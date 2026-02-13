@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import {
   Bot,
   Check,
@@ -12,17 +12,40 @@ import {
   Settings2,
   Trash2,
 } from "lucide-react";
-import { ampcodeApi, apiCallApi, getApiCallErrorMessage, providersApi } from "@/lib/http/apis";
-import type { ApiCallResult, OpenAIProvider, ProviderSimpleConfig } from "@/lib/http/types";
+import {
+  ampcodeApi,
+  apiCallApi,
+  getApiCallErrorMessage,
+  providersApi,
+  usageApi,
+} from "@/lib/http/apis";
+import type {
+  ApiCallResult,
+  OpenAIProvider,
+  ProviderModel,
+  ProviderSimpleConfig,
+} from "@/lib/http/types";
+import { iterateUsageRecords } from "@/modules/monitor/monitor-utils";
 import { Button } from "@/modules/ui/Button";
 import { Card } from "@/modules/ui/Card";
 import { EmptyState } from "@/modules/ui/EmptyState";
+import { TextInput } from "@/modules/ui/Input";
 import { Modal } from "@/modules/ui/Modal";
 import { ConfirmModal } from "@/modules/ui/ConfirmModal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/modules/ui/Tabs";
-import { TextInput } from "@/modules/ui/Input";
 import { ToggleSwitch } from "@/modules/ui/ToggleSwitch";
 import { useToast } from "@/modules/ui/ToastProvider";
+import { KeyValueInputList, keyValueEntriesToRecord, recordToKeyValueEntries, type KeyValueEntry } from "@/modules/providers/KeyValueInputList";
+import { ModelInputList, createEmptyModelEntry, type ModelEntryDraft } from "@/modules/providers/ModelInputList";
+import { ProviderStatusBar } from "@/modules/providers/ProviderStatusBar";
+import {
+  buildCandidateUsageSourceIds,
+  calculateStatusBarData,
+  mergeKeyStatBuckets,
+  normalizeUsageSourceId,
+  type KeyStatBucket,
+  type StatusBarData,
+} from "@/modules/providers/provider-usage";
 
 const DISABLE_ALL_MODELS_RULE = "*";
 
@@ -32,7 +55,11 @@ const hasDisableAllModelsRule = (models?: string[]) =>
 const stripDisableAllModelsRule = (models?: string[]) =>
   Array.isArray(models) ? models.filter((m) => String(m ?? "").trim() !== DISABLE_ALL_MODELS_RULE) : [];
 
-const withDisableAllModelsRule = (models?: string[]) => [...stripDisableAllModelsRule(models), DISABLE_ALL_MODELS_RULE];
+const withDisableAllModelsRule = (models?: string[]) => [
+  ...stripDisableAllModelsRule(models),
+  DISABLE_ALL_MODELS_RULE,
+];
+
 const withoutDisableAllModelsRule = (models?: string[]) => stripDisableAllModelsRule(models);
 
 const maskApiKey = (value: string): string => {
@@ -42,65 +69,13 @@ const maskApiKey = (value: string): string => {
   return `${trimmed.slice(0, 6)}***${trimmed.slice(-4)}`;
 };
 
-const parseHeadersJson = (text: string): { value?: Record<string, string>; error?: string } => {
-  const trimmed = text.trim();
-  if (!trimmed) return { value: undefined };
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { error: "headers 必须是 JSON 对象" };
-    }
-    const result: Record<string, string> = {};
-    Object.entries(parsed as Record<string, unknown>).forEach(([k, v]) => {
-      const key = String(k ?? "").trim();
-      if (!key) return;
-      if (typeof v === "string") {
-        const val = v.trim();
-        if (val) result[key] = val;
-      } else if (typeof v === "number" || typeof v === "boolean") {
-        result[key] = String(v);
-      }
-    });
-    return { value: Object.keys(result).length ? result : undefined };
-  } catch {
-    return { error: "headers JSON 解析失败" };
-  }
-};
-
 const excludedModelsToText = (models?: string[]) => (Array.isArray(models) ? models.join("\n") : "");
+
 const excludedModelsFromText = (text: string) =>
   text
     .split(/[\n,]+/)
     .map((item) => item.trim())
     .filter(Boolean);
-
-const modelsFromText = (text: string) => {
-  const rows = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return rows
-    .map((line) => {
-      const [left, right] = line.split("=>").map((s) => s.trim());
-      if (!left) return null;
-      if (!right || right === left) return { name: left };
-      return { name: left, alias: right };
-    })
-    .filter(Boolean) as { name: string; alias?: string }[];
-};
-
-const modelsToText = (models?: { name?: string; alias?: string }[]) => {
-  if (!Array.isArray(models) || models.length === 0) return "";
-  return models
-    .map((m) => {
-      const name = String(m?.name ?? "").trim();
-      const alias = String(m?.alias ?? "").trim();
-      if (!name) return null;
-      return alias && alias !== name ? `${name} => ${alias}` : name;
-    })
-    .filter(Boolean)
-    .join("\n");
-};
 
 const normalizeOpenAIBaseUrl = (baseUrl: string): string => {
   let trimmed = String(baseUrl || "").trim();
@@ -147,8 +122,52 @@ type ProviderKeyDraft = {
   baseUrl: string;
   proxyUrl: string;
   excludedModelsText: string;
-  headersText: string;
-  modelsText: string;
+  headersEntries: KeyValueEntry[];
+  modelEntries: ModelEntryDraft[];
+};
+
+const buildModelEntries = (models?: ProviderModel[]): ModelEntryDraft[] => {
+  if (!Array.isArray(models) || models.length === 0) return [];
+  return models.map((model) => ({
+    id: `model-${Date.now()}-${Math.random().toString(16).slice(2)}-${model.name ?? ""}`,
+    name: model.name ?? "",
+    alias: model.alias ?? "",
+    priorityText: model.priority !== undefined ? String(model.priority) : "",
+    testModel: model.testModel ?? "",
+  }));
+};
+
+const commitModelEntries = (
+  drafts: ModelEntryDraft[],
+  options?: { requireAlias?: boolean },
+): { models?: ProviderModel[]; error?: string } => {
+  const models: ProviderModel[] = [];
+  for (const draft of drafts) {
+    const name = draft.name.trim();
+    if (!name) continue;
+
+    const alias = draft.alias.trim();
+    if (options?.requireAlias && !alias) {
+      return { error: "models 必须填写 alias（使用 name => alias）" };
+    }
+
+    const priorityText = draft.priorityText.trim();
+    const priority = priorityText !== "" ? Number(priorityText) : undefined;
+    if (priority !== undefined && !Number.isFinite(priority)) {
+      return { error: `模型 ${name} 的 priority 必须是数字` };
+    }
+
+    const testModel = draft.testModel.trim();
+
+    models.push({
+      name,
+      ...(alias && alias !== name ? { alias } : {}),
+      ...(priority !== undefined ? { priority } : {}),
+      ...(testModel ? { testModel } : {}),
+    });
+  }
+
+  return { models: models.length ? models : undefined };
 };
 
 const buildProviderKeyDraft = (input?: ProviderSimpleConfig | null): ProviderKeyDraft => ({
@@ -157,37 +176,38 @@ const buildProviderKeyDraft = (input?: ProviderSimpleConfig | null): ProviderKey
   baseUrl: input?.baseUrl ?? "",
   proxyUrl: input?.proxyUrl ?? "",
   excludedModelsText: excludedModelsToText(input?.excludedModels),
-  headersText: input?.headers ? JSON.stringify(input.headers, null, 2) : "",
-  modelsText: modelsToText(input?.models),
+  headersEntries: recordToKeyValueEntries(input?.headers),
+  modelEntries: buildModelEntries(input?.models),
 });
 
 type OpenAIDraft = {
   name: string;
   baseUrl: string;
   prefix: string;
-  headersText: string;
+  headersEntries: KeyValueEntry[];
   priorityText: string;
   testModel: string;
-  apiKeyEntries: { apiKey: string; proxyUrl: string; headersText: string; id: string }[];
-  modelsText: string;
+  apiKeyEntries: { apiKey: string; proxyUrl: string; headersEntries: KeyValueEntry[]; id: string }[];
+  modelEntries: ModelEntryDraft[];
 };
 
 const buildOpenAIDraft = (input?: OpenAIProvider | null): OpenAIDraft => ({
   name: input?.name ?? "",
   baseUrl: input?.baseUrl ?? "",
   prefix: input?.prefix ?? "",
-  headersText: input?.headers ? JSON.stringify(input.headers, null, 2) : "",
+  headersEntries: recordToKeyValueEntries(input?.headers),
   priorityText: input?.priority !== undefined ? String(input.priority) : "",
   testModel: input?.testModel ?? "",
-  apiKeyEntries: Array.isArray(input?.apiKeyEntries) && input.apiKeyEntries.length
-    ? input.apiKeyEntries.map((entry, idx) => ({
-        id: `key-${idx}-${entry.apiKey}`,
-        apiKey: entry.apiKey ?? "",
-        proxyUrl: entry.proxyUrl ?? "",
-        headersText: entry.headers ? JSON.stringify(entry.headers, null, 2) : "",
-      }))
-    : [{ id: `key-${Date.now()}`, apiKey: "", proxyUrl: "", headersText: "" }],
-  modelsText: modelsToText(input?.models),
+  apiKeyEntries:
+    Array.isArray(input?.apiKeyEntries) && input.apiKeyEntries.length
+      ? input.apiKeyEntries.map((entry, idx) => ({
+          id: `key-${idx}-${entry.apiKey}`,
+          apiKey: entry.apiKey ?? "",
+          proxyUrl: entry.proxyUrl ?? "",
+          headersEntries: recordToKeyValueEntries(entry.headers),
+        }))
+      : [{ id: `key-${Date.now()}`, apiKey: "", proxyUrl: "", headersEntries: [] }],
+  modelEntries: buildModelEntries(input?.models),
 });
 
 type AmpMappingEntry = { id: string; from: string; to: string };
@@ -212,6 +232,16 @@ const readBool = (obj: Record<string, unknown> | null, ...keys: string[]): boole
   return false;
 };
 
+const sumStatsByCandidates = (candidates: string[], statsBySource: Record<string, KeyStatBucket>): KeyStatBucket => {
+  let total: KeyStatBucket = { success: 0, failure: 0 };
+  for (const candidate of candidates) {
+    const bucket = statsBySource[candidate];
+    if (!bucket) continue;
+    total = mergeKeyStatBuckets(total, bucket);
+  }
+  return total;
+};
+
 export function ProvidersPage() {
   const { notify } = useToast();
   const [isPending, startTransition] = useTransition();
@@ -224,6 +254,9 @@ export function ProvidersPage() {
   const [codexKeys, setCodexKeys] = useState<ProviderSimpleConfig[]>([]);
   const [vertexKeys, setVertexKeys] = useState<ProviderSimpleConfig[]>([]);
   const [openaiProviders, setOpenaiProviders] = useState<OpenAIProvider[]>([]);
+
+  const [usageEntries, setUsageEntries] = useState<Array<{ timestamp: string; failed: boolean; source: string }>>([]);
+  const [usageStatsBySource, setUsageStatsBySource] = useState<Record<string, KeyStatBucket>>({});
 
   const [ampcode, setAmpcode] = useState<Record<string, unknown> | null>(null);
   const [ampUpstreamUrl, setAmpUpstreamUrl] = useState("");
@@ -244,6 +277,7 @@ export function ProvidersPage() {
   const [discoveredModels, setDiscoveredModels] = useState<{ id: string; owned_by?: string }[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [discoverSelected, setDiscoverSelected] = useState<Set<string>>(new Set());
+
   const [confirm, setConfirm] = useState<
     | null
     | { type: "deleteKey"; keyType: "gemini" | "claude" | "codex" | "vertex"; index: number }
@@ -262,7 +296,9 @@ export function ProvidersPage() {
   const refreshAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [gemini, claude, codex, vertex, openai, amp, ampMap] = await Promise.all([
+      const usagePromise = usageApi.getUsage().catch(() => null);
+
+      const [gemini, claude, codex, vertex, openai, amp, ampMap, usage] = await Promise.all([
         providersApi.getGeminiKeys(),
         providersApi.getClaudeConfigs(),
         providersApi.getCodexConfigs(),
@@ -270,14 +306,16 @@ export function ProvidersPage() {
         providersApi.getOpenAIProviders(),
         ampcodeApi.getAmpcode(),
         ampcodeApi.getModelMappings(),
+        usagePromise,
       ]);
+
       setGeminiKeys(gemini);
       setClaudeKeys(claude);
       setCodexKeys(codex);
       setVertexKeys(vertex);
       setOpenaiProviders(openai);
 
-      const ampObj = (amp && typeof amp === "object" && !Array.isArray(amp)) ? (amp as Record<string, unknown>) : {};
+      const ampObj = amp && typeof amp === "object" && !Array.isArray(amp) ? (amp as Record<string, unknown>) : {};
       setAmpcode(ampObj);
       setAmpUpstreamUrl(readString(ampObj, "upstreamUrl", "upstream-url"));
       setAmpForceMappings(readBool(ampObj, "forceModelMappings", "force-model-mappings"));
@@ -294,6 +332,30 @@ export function ProvidersPage() {
         })
         .filter(Boolean) as AmpMappingEntry[];
       setAmpMappings(entries.length ? entries : [{ id: `map-${Date.now()}`, from: "", to: "" }]);
+
+      if (usage) {
+        const flattened = iterateUsageRecords(usage);
+        const normalized = flattened
+          .map((detail) => {
+            const source = normalizeUsageSourceId(detail.source, maskApiKey);
+            if (!source) return null;
+            return { timestamp: detail.timestamp, failed: Boolean(detail.failed), source };
+          })
+          .filter(Boolean) as Array<{ timestamp: string; failed: boolean; source: string }>;
+
+        const stats: Record<string, KeyStatBucket> = {};
+        normalized.forEach((detail) => {
+          const bucket = (stats[detail.source] ??= { success: 0, failure: 0 });
+          if (detail.failed) bucket.failure += 1;
+          else bucket.success += 1;
+        });
+
+        setUsageEntries(normalized);
+        setUsageStatsBySource(stats);
+      } else {
+        setUsageEntries([]);
+        setUsageStatsBySource({});
+      }
     } catch (err: unknown) {
       notify({ type: "error", message: err instanceof Error ? err.message : "加载配置失败" });
     } finally {
@@ -308,13 +370,7 @@ export function ProvidersPage() {
   const openKeyEditor = useCallback(
     (type: "gemini" | "claude" | "codex" | "vertex", index: number | null) => {
       const list =
-        type === "gemini"
-          ? geminiKeys
-          : type === "claude"
-            ? claudeKeys
-            : type === "codex"
-              ? codexKeys
-              : vertexKeys;
+        type === "gemini" ? geminiKeys : type === "claude" ? claudeKeys : type === "codex" ? codexKeys : vertexKeys;
       const current = index === null ? null : list[index] ?? null;
       setEditKeyType(type);
       setEditKeyIndex(index);
@@ -332,9 +388,16 @@ export function ProvidersPage() {
       return null;
     }
 
-    const headersRes = parseHeadersJson(keyDraft.headersText);
-    if (headersRes.error) {
-      setKeyDraftError(headersRes.error);
+    const headers = keyValueEntriesToRecord(keyDraft.headersEntries);
+
+    const excludedModels = keyDraft.excludedModelsText.trim()
+      ? excludedModelsFromText(keyDraft.excludedModelsText)
+      : undefined;
+
+    const requireAlias = editKeyType === "vertex";
+    const modelCommit = commitModelEntries(keyDraft.modelEntries, { requireAlias });
+    if (modelCommit.error) {
+      setKeyDraftError(requireAlias ? `Vertex：${modelCommit.error}` : modelCommit.error);
       return null;
     }
 
@@ -343,17 +406,10 @@ export function ProvidersPage() {
       ...(keyDraft.prefix.trim() ? { prefix: keyDraft.prefix.trim() } : {}),
       ...(keyDraft.baseUrl.trim() ? { baseUrl: keyDraft.baseUrl.trim() } : {}),
       ...(keyDraft.proxyUrl.trim() ? { proxyUrl: keyDraft.proxyUrl.trim() } : {}),
-      ...(headersRes.value ? { headers: headersRes.value } : {}),
-      ...(keyDraft.excludedModelsText.trim()
-        ? { excludedModels: excludedModelsFromText(keyDraft.excludedModelsText) }
-        : {}),
-      ...(keyDraft.modelsText.trim() ? { models: modelsFromText(keyDraft.modelsText) } : {}),
+      ...(headers ? { headers } : {}),
+      ...(excludedModels ? { excludedModels } : {}),
+      ...(modelCommit.models ? { models: modelCommit.models } : {}),
     };
-
-    if (editKeyType === "vertex" && result.models?.some((model) => !model.alias?.trim())) {
-      setKeyDraftError("Vertex 的 models 必须使用 “name => alias” 形式（缺少 alias）");
-      return null;
-    }
 
     setKeyDraftError(null);
     return result;
@@ -390,30 +446,16 @@ export function ProvidersPage() {
       }
       notify({ type: "success", message: "已保存" });
       setEditKeyOpen(false);
+      startTransition(() => void refreshAll());
     } catch (err: unknown) {
       notify({ type: "error", message: err instanceof Error ? err.message : "保存失败" });
     }
-  }, [
-    claudeKeys,
-    codexKeys,
-    commitKeyDraft,
-    editKeyIndex,
-    editKeyType,
-    geminiKeys,
-    notify,
-    vertexKeys,
-  ]);
+  }, [claudeKeys, codexKeys, commitKeyDraft, editKeyIndex, editKeyType, geminiKeys, notify, refreshAll, startTransition, vertexKeys]);
 
   const deleteKey = useCallback(
     async (type: "gemini" | "claude" | "codex" | "vertex", index: number) => {
       const list =
-        type === "gemini"
-          ? geminiKeys
-          : type === "claude"
-            ? claudeKeys
-            : type === "codex"
-              ? codexKeys
-              : vertexKeys;
+        type === "gemini" ? geminiKeys : type === "claude" ? claudeKeys : type === "codex" ? codexKeys : vertexKeys;
       const entry = list[index];
       if (!entry) return;
 
@@ -445,7 +487,11 @@ export function ProvidersPage() {
       const current = list[index];
       if (!current) return;
       const prev = list;
-      const nextExcluded = enabled ? withoutDisableAllModelsRule(current.excludedModels) : withDisableAllModelsRule(current.excludedModels);
+
+      const nextExcluded = enabled
+        ? withoutDisableAllModelsRule(current.excludedModels)
+        : withDisableAllModelsRule(current.excludedModels);
+
       const nextItem: ProviderSimpleConfig = { ...current, excludedModels: nextExcluded };
       const nextList = prev.map((item, i) => (i === index ? nextItem : item));
 
@@ -461,6 +507,7 @@ export function ProvidersPage() {
           await providersApi.saveCodexConfigs(nextList);
         }
         notify({ type: "success", message: enabled ? "已启用" : "已禁用" });
+        startTransition(() => void refreshAll());
       } catch (err: unknown) {
         if (type === "gemini") setGeminiKeys(prev);
         else if (type === "claude") setClaudeKeys(prev);
@@ -468,7 +515,7 @@ export function ProvidersPage() {
         notify({ type: "error", message: err instanceof Error ? err.message : "更新失败" });
       }
     },
-    [claudeKeys, codexKeys, geminiKeys, notify],
+    [claudeKeys, codexKeys, geminiKeys, notify, refreshAll, startTransition],
   );
 
   const openOpenAIEditor = useCallback(
@@ -496,19 +543,10 @@ export function ProvidersPage() {
       return null;
     }
 
-    const headersRes = parseHeadersJson(openaiDraft.headersText);
-    if (headersRes.error) {
-      setOpenaiDraftError(headersRes.error);
-      return null;
-    }
+    const headers = keyValueEntriesToRecord(openaiDraft.headersEntries);
 
     const priorityText = openaiDraft.priorityText.trim();
-    const priority =
-      priorityText !== ""
-        ? Number.isFinite(Number(priorityText))
-          ? Number(priorityText)
-          : NaN
-        : undefined;
+    const priority = priorityText !== "" ? Number(priorityText) : undefined;
     if (priority !== undefined && !Number.isFinite(priority)) {
       setOpenaiDraftError("priority 必须是数字");
       return null;
@@ -518,14 +556,12 @@ export function ProvidersPage() {
       .map((entry) => {
         const apiKey = entry.apiKey.trim();
         if (!apiKey) return null;
-        const entryHeadersRes = parseHeadersJson(entry.headersText);
-        if (entryHeadersRes.error) {
-          throw new Error(`apiKeyEntries headers 解析失败：${entryHeadersRes.error}`);
-        }
+        const entryHeaders = keyValueEntriesToRecord(entry.headersEntries);
+        const proxyUrl = entry.proxyUrl.trim();
         return {
           apiKey,
-          ...(entry.proxyUrl.trim() ? { proxyUrl: entry.proxyUrl.trim() } : {}),
-          ...(entryHeadersRes.value ? { headers: entryHeadersRes.value } : {}),
+          ...(proxyUrl ? { proxyUrl } : {}),
+          ...(entryHeaders ? { headers: entryHeaders } : {}),
         };
       })
       .filter(Boolean) as OpenAIProvider["apiKeyEntries"];
@@ -535,7 +571,11 @@ export function ProvidersPage() {
       return null;
     }
 
-    const models = openaiDraft.modelsText.trim() ? modelsFromText(openaiDraft.modelsText) : undefined;
+    const modelCommit = commitModelEntries(openaiDraft.modelEntries);
+    if (modelCommit.error) {
+      setOpenaiDraftError(modelCommit.error);
+      return null;
+    }
 
     setOpenaiDraftError(null);
 
@@ -543,10 +583,10 @@ export function ProvidersPage() {
       name,
       baseUrl,
       ...(openaiDraft.prefix.trim() ? { prefix: openaiDraft.prefix.trim() } : {}),
-      ...(headersRes.value ? { headers: headersRes.value } : {}),
+      ...(headers ? { headers } : {}),
       ...(priority !== undefined ? { priority } : {}),
       ...(openaiDraft.testModel.trim() ? { testModel: openaiDraft.testModel.trim() } : {}),
-      ...(models ? { models } : {}),
+      ...(modelCommit.models ? { models: modelCommit.models } : {}),
       apiKeyEntries,
     };
   }, [openaiDraft]);
@@ -557,16 +597,20 @@ export function ProvidersPage() {
       if (!value) return;
 
       const index = editOpenAIIndex;
-      const next = index === null ? [...openaiProviders, value] : openaiProviders.map((p, i) => (i === index ? value : p));
+      const next =
+        index === null
+          ? [...openaiProviders, value]
+          : openaiProviders.map((p, i) => (i === index ? value : p));
 
       setOpenaiProviders(next);
       await providersApi.saveOpenAIProviders(next);
       notify({ type: "success", message: "已保存" });
       setEditOpenAIOpen(false);
+      startTransition(() => void refreshAll());
     } catch (err: unknown) {
       notify({ type: "error", message: err instanceof Error ? err.message : "保存失败" });
     }
-  }, [commitOpenAIDraft, editOpenAIIndex, notify, openaiProviders]);
+  }, [commitOpenAIDraft, editOpenAIIndex, notify, openaiProviders, refreshAll, startTransition]);
 
   const deleteOpenAIProvider = useCallback(
     async (index: number) => {
@@ -595,14 +639,15 @@ export function ProvidersPage() {
     setDiscoverSelected(new Set());
     try {
       const endpoint = buildModelsEndpoint(baseUrl);
-      const headersRes = parseHeadersJson(openaiDraft.headersText);
-      if (headersRes.error) {
-        notify({ type: "error", message: headersRes.error });
-        return;
-      }
-      const headers: Record<string, string> = headersRes.value ? { ...headersRes.value } : {};
+
+      const providerHeaders = keyValueEntriesToRecord(openaiDraft.headersEntries) ?? {};
+      const firstEntry = openaiDraft.apiKeyEntries.find((entry) => entry.apiKey.trim());
+      const keyHeaders = firstEntry ? keyValueEntriesToRecord(firstEntry.headersEntries) ?? {} : {};
+
+      const headers: Record<string, string> = { ...providerHeaders, ...keyHeaders };
+
       const hasAuthHeader = Boolean(headers.Authorization || (headers as any).authorization);
-      const firstKey = openaiDraft.apiKeyEntries.find((entry) => entry.apiKey.trim())?.apiKey.trim();
+      const firstKey = firstEntry?.apiKey.trim();
       if (!hasAuthHeader && firstKey) {
         headers.Authorization = `Bearer ${firstKey}`;
       }
@@ -623,7 +668,7 @@ export function ProvidersPage() {
     } finally {
       setDiscovering(false);
     }
-  }, [notify, openaiDraft.apiKeyEntries, openaiDraft.baseUrl, openaiDraft.headersText]);
+  }, [notify, openaiDraft.apiKeyEntries, openaiDraft.baseUrl, openaiDraft.headersEntries]);
 
   const applyDiscoveredModels = useCallback(() => {
     const selected = new Set(discoverSelected);
@@ -633,18 +678,20 @@ export function ProvidersPage() {
       return;
     }
 
-    const current = modelsFromText(openaiDraft.modelsText);
-    const seen = new Set(current.map((m) => m.name.toLowerCase()));
+    const current = openaiDraft.modelEntries;
+    const seen = new Set(current.map((m) => m.name.trim().toLowerCase()).filter(Boolean));
+
     const merged = [...current];
     for (const model of picked) {
       const key = model.id.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push({ name: model.id });
+      merged.push({ ...createEmptyModelEntry(), name: model.id });
     }
-    setOpenaiDraft((prev) => ({ ...prev, modelsText: modelsToText(merged) }));
+
+    setOpenaiDraft((prev) => ({ ...prev, modelEntries: merged }));
     notify({ type: "success", message: "已合并模型列表" });
-  }, [discoverSelected, discoveredModels, notify, openaiDraft.modelsText]);
+  }, [discoverSelected, discoveredModels, notify, openaiDraft.modelEntries]);
 
   const saveAmpcode = useCallback(async () => {
     try {
@@ -675,7 +722,7 @@ export function ProvidersPage() {
     }
   }, [ampForceMappings, ampMappings, ampUpstreamApiKey, ampUpstreamUrl, notify, refreshAll, startTransition]);
 
-  const copyMasked = useCallback(
+  const copyText = useCallback(
     async (value: string) => {
       try {
         await navigator.clipboard.writeText(value);
@@ -687,11 +734,74 @@ export function ProvidersPage() {
     [notify],
   );
 
+  const getSimpleStats = useCallback(
+    (config: ProviderSimpleConfig): KeyStatBucket => {
+      const candidates = buildCandidateUsageSourceIds({ apiKey: config.apiKey, prefix: config.prefix, masker: maskApiKey });
+      return sumStatsByCandidates(candidates, usageStatsBySource);
+    },
+    [usageStatsBySource],
+  );
+
+  const getSimpleStatusBar = useCallback(
+    (config: ProviderSimpleConfig): StatusBarData => {
+      const candidates = new Set(
+        buildCandidateUsageSourceIds({ apiKey: config.apiKey, prefix: config.prefix, masker: maskApiKey }),
+      );
+      const details = candidates.size ? usageEntries.filter((d) => candidates.has(d.source)) : [];
+      return calculateStatusBarData(details);
+    },
+    [usageEntries],
+  );
+
+  const getOpenAIProviderStats = useCallback(
+    (provider: OpenAIProvider): KeyStatBucket => {
+      const candidates = new Set<string>();
+      buildCandidateUsageSourceIds({ prefix: provider.prefix, masker: maskApiKey }).forEach((id) => candidates.add(id));
+      (provider.apiKeyEntries || []).forEach((entry) => {
+        buildCandidateUsageSourceIds({ apiKey: entry.apiKey, masker: maskApiKey }).forEach((id) => candidates.add(id));
+      });
+      return sumStatsByCandidates(Array.from(candidates), usageStatsBySource);
+    },
+    [usageStatsBySource],
+  );
+
+  const getOpenAIProviderStatusBar = useCallback(
+    (provider: OpenAIProvider): StatusBarData => {
+      const candidates = new Set<string>();
+      buildCandidateUsageSourceIds({ prefix: provider.prefix, masker: maskApiKey }).forEach((id) => candidates.add(id));
+      (provider.apiKeyEntries || []).forEach((entry) => {
+        buildCandidateUsageSourceIds({ apiKey: entry.apiKey, masker: maskApiKey }).forEach((id) => candidates.add(id));
+      });
+      const details = candidates.size ? usageEntries.filter((d) => candidates.has(d.source)) : [];
+      return calculateStatusBarData(details);
+    },
+    [usageEntries],
+  );
+
+  const editKeyEnabled = useMemo(() => {
+    const list = excludedModelsFromText(keyDraft.excludedModelsText);
+    return !hasDisableAllModelsRule(list);
+  }, [keyDraft.excludedModelsText]);
+
+  const editKeyEnabledToggle = useCallback(
+    (enabled: boolean) => {
+      const current = excludedModelsFromText(keyDraft.excludedModelsText);
+      const next = enabled ? withoutDisableAllModelsRule(current) : withDisableAllModelsRule(current);
+      setKeyDraft((prev) => ({ ...prev, excludedModelsText: next.join("\n") }));
+    },
+    [keyDraft.excludedModelsText],
+  );
+
+  const editKeyExcludedCount = useMemo(() => {
+    const list = excludedModelsFromText(keyDraft.excludedModelsText);
+    return stripDisableAllModelsRule(list).length;
+  }, [keyDraft.excludedModelsText]);
+
   return (
     <div className="space-y-6">
       <Card
         title="配置总览"
-        description="加载配置后可在各标签页进行编辑与保存。"
+        description="在各标签页管理 API Key / OpenAI 提供商 / Ampcode 映射。已自动关联使用统计用于展示成功/失败与近况。"
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" size="sm" onClick={() => void refreshAll()} disabled={loading}>
@@ -722,7 +832,9 @@ export function ProvidersPage() {
               onEdit={(idx) => openKeyEditor("gemini", idx)}
               onDelete={(idx) => setConfirm({ type: "deleteKey", keyType: "gemini", index: idx })}
               onToggleEnabled={(idx, enabled) => void toggleKeyEnabled("gemini", idx, enabled)}
-              onCopy={(idx) => void copyMasked((geminiKeys[idx]?.apiKey ?? "").trim())}
+              onCopy={(idx) => void copyText((geminiKeys[idx]?.apiKey ?? "").trim())}
+              getStats={getSimpleStats}
+              getStatusBar={getSimpleStatusBar}
             />
           </TabsContent>
 
@@ -730,13 +842,15 @@ export function ProvidersPage() {
             <ProviderKeyListCard
               icon={Bot}
               title="Claude Keys"
-              description="支持 Excluded Models（用 * 一键禁用）以及自定义模型列表。"
+              description="支持 proxyUrl / 自定义 headers / 模型别名 / Excluded Models（用 * 一键禁用）。"
               items={claudeKeys}
               onAdd={() => openKeyEditor("claude", null)}
               onEdit={(idx) => openKeyEditor("claude", idx)}
               onDelete={(idx) => setConfirm({ type: "deleteKey", keyType: "claude", index: idx })}
               onToggleEnabled={(idx, enabled) => void toggleKeyEnabled("claude", idx, enabled)}
-              onCopy={(idx) => void copyMasked((claudeKeys[idx]?.apiKey ?? "").trim())}
+              onCopy={(idx) => void copyText((claudeKeys[idx]?.apiKey ?? "").trim())}
+              getStats={getSimpleStats}
+              getStatusBar={getSimpleStatusBar}
             />
           </TabsContent>
 
@@ -744,13 +858,15 @@ export function ProvidersPage() {
             <ProviderKeyListCard
               icon={FileKey}
               title="Codex Keys"
-              description="支持 baseUrl / proxyUrl / headers 等配置。"
+              description="支持 baseUrl / proxyUrl / headers / models 等配置。"
               items={codexKeys}
               onAdd={() => openKeyEditor("codex", null)}
               onEdit={(idx) => openKeyEditor("codex", idx)}
               onDelete={(idx) => setConfirm({ type: "deleteKey", keyType: "codex", index: idx })}
               onToggleEnabled={(idx, enabled) => void toggleKeyEnabled("codex", idx, enabled)}
-              onCopy={(idx) => void copyMasked((codexKeys[idx]?.apiKey ?? "").trim())}
+              onCopy={(idx) => void copyText((codexKeys[idx]?.apiKey ?? "").trim())}
+              getStats={getSimpleStats}
+              getStatusBar={getSimpleStatusBar}
             />
           </TabsContent>
 
@@ -758,21 +874,23 @@ export function ProvidersPage() {
             <ProviderKeyListCard
               icon={Database}
               title="Vertex Keys"
-              description="支持模型映射（通过 models 列表维护 name=>alias）。"
+              description="models 必须维护 name=>alias，用于将下游模型名映射到 Vertex。"
               items={vertexKeys}
               onAdd={() => openKeyEditor("vertex", null)}
               onEdit={(idx) => openKeyEditor("vertex", idx)}
               onDelete={(idx) => setConfirm({ type: "deleteKey", keyType: "vertex", index: idx })}
-              onCopy={(idx) => void copyMasked((vertexKeys[idx]?.apiKey ?? "").trim())}
+              onCopy={(idx) => void copyText((vertexKeys[idx]?.apiKey ?? "").trim())}
+              getStats={getSimpleStats}
+              getStatusBar={getSimpleStatusBar}
             />
           </TabsContent>
 
           <TabsContent value="openai">
             <Card
               title="OpenAI 兼容提供商"
-              description="多密钥管理、模型别名与模型发现（通过 api-call 拉取 /models）。"
+              description="多密钥、headers、模型别名与 /models 发现。"
               actions={
-                <Button variant="primary" size="sm" onClick={() => openOpenAIEditor(null)} disabled={loading}>
+                <Button variant="primary" size="sm" onClick={() => openOpenAIEditor(null)}>
                   <Plus size={14} />
                   新增提供商
                 </Button>
@@ -782,36 +900,133 @@ export function ProvidersPage() {
                 <EmptyState title="暂无 OpenAI 提供商" description="点击“新增提供商”开始配置。" />
               ) : (
                 <div className="space-y-3">
-                  {openaiProviders.map((provider, idx) => (
-                    <div
-                      key={`${provider.name}:${idx}`}
-                      className="rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
-                            {provider.name}
-                          </p>
-                          <p className="mt-1 truncate font-mono text-xs text-slate-700 dark:text-slate-200">
-                            baseUrl：{provider.baseUrl || "--"}
-                          </p>
-                          <p className="mt-1 text-xs text-slate-600 dark:text-white/65">
-                            keys：{provider.apiKeyEntries?.length ?? 0} · models：{provider.models?.length ?? 0}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Button variant="secondary" size="sm" onClick={() => openOpenAIEditor(idx)}>
-                            <Settings2 size={14} />
-                            编辑
-                          </Button>
-                          <Button variant="danger" size="sm" onClick={() => setConfirm({ type: "deleteOpenAI", index: idx })}>
-                            <Trash2 size={14} />
-                            删除
-                          </Button>
+                  {openaiProviders.map((provider, idx) => {
+                    const headerEntries = Object.entries(provider.headers || {});
+                    const stats = getOpenAIProviderStats(provider);
+                    const statusData = getOpenAIProviderStatusBar(provider);
+
+                    return (
+                      <div
+                        key={`${provider.name}:${idx}`}
+                        className="rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
+                              {provider.name}
+                            </p>
+                            {provider.prefix ? (
+                              <p className="mt-1 truncate font-mono text-xs text-slate-700 dark:text-slate-200">
+                                prefix：{provider.prefix}
+                              </p>
+                            ) : null}
+                            <p className="mt-1 truncate font-mono text-xs text-slate-700 dark:text-slate-200">
+                              baseUrl：{provider.baseUrl || "--"}
+                            </p>
+
+                            {headerEntries.length ? (
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {headerEntries.map(([k, v]) => (
+                                  <span
+                                    key={k}
+                                    className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/75"
+                                  >
+                                    <span className="font-semibold">{k}:</span> {String(v)}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+
+                            {provider.apiKeyEntries?.length ? (
+                              <div className="mt-2 space-y-1">
+                                <p className="text-xs font-semibold text-slate-700 dark:text-white/75">
+                                  Keys：{provider.apiKeyEntries.length}
+                                </p>
+                                <div className="space-y-1">
+                                  {provider.apiKeyEntries.map((entry, entryIndex) => {
+                                    const entryCandidates = buildCandidateUsageSourceIds({
+                                      apiKey: entry.apiKey,
+                                      masker: maskApiKey,
+                                    });
+                                    const entryStats = sumStatsByCandidates(entryCandidates, usageStatsBySource);
+                                    return (
+                                      <div
+                                        key={`${entry.apiKey}:${entryIndex}`}
+                                        className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-xs dark:border-neutral-800 dark:bg-neutral-950/60"
+                                      >
+                                        <div className="min-w-0">
+                                          <p className="truncate font-mono text-slate-900 dark:text-white">
+                                            {entryIndex + 1}. {maskApiKey(entry.apiKey)}
+                                          </p>
+                                          {entry.proxyUrl ? (
+                                            <p className="mt-0.5 truncate font-mono text-slate-600 dark:text-white/55">
+                                              proxy：{entry.proxyUrl}
+                                            </p>
+                                          ) : null}
+                                        </div>
+                                        <div className="flex items-center gap-2 tabular-nums">
+                                          <span className="rounded-full bg-emerald-600/10 px-2 py-0.5 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200">
+                                            成功 {entryStats.success}
+                                          </span>
+                                          <span className="rounded-full bg-rose-600/10 px-2 py-0.5 text-rose-700 dark:bg-rose-500/15 dark:text-rose-200">
+                                            失败 {entryStats.failure}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-white/65 tabular-nums">
+                              <span>models：{provider.models?.length ?? 0}</span>
+                              <span>·</span>
+                              <span>成功：{stats.success}</span>
+                              <span>·</span>
+                              <span>失败：{stats.failure}</span>
+                              {provider.testModel ? (
+                                <>
+                                  <span>·</span>
+                                  <span className="truncate">testModel：{provider.testModel}</span>
+                                </>
+                              ) : null}
+                            </div>
+
+                            {provider.models?.length ? (
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                {provider.models.map((model) => (
+                                  <span
+                                    key={model.name}
+                                    className="rounded-full bg-slate-900 px-2 py-0.5 text-[11px] text-white dark:bg-white dark:text-neutral-950"
+                                    title={model.alias && model.alias !== model.name ? `${model.name} => ${model.alias}` : model.name}
+                                  >
+                                    {model.alias && model.alias !== model.name ? `${model.name} → ${model.alias}` : model.name}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+
+                            <ProviderStatusBar data={statusData} />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button variant="secondary" size="sm" onClick={() => openOpenAIEditor(idx)}>
+                              <Settings2 size={14} />
+                              编辑
+                            </Button>
+                            <Button
+                              variant="danger"
+                              size="sm"
+                              onClick={() => setConfirm({ type: "deleteOpenAI", index: idx })}
+                            >
+                              <Trash2 size={14} />
+                              删除
+                            </Button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </Card>
@@ -822,7 +1037,12 @@ export function ProvidersPage() {
               title="Ampcode 集成"
               description="配置上游 URL / API Key、模型映射与强制映射开关。"
               actions={
-                <Button variant="primary" size="sm" onClick={() => void saveAmpcode()} disabled={loading || isPending}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => void saveAmpcode()}
+                  disabled={loading || isPending}
+                >
                   <Save size={14} />
                   保存
                 </Button>
@@ -920,11 +1140,17 @@ export function ProvidersPage() {
       <Modal
         open={editKeyOpen}
         title={`${editKeyIndex === null ? "新增" : "编辑"} ${editKeyTitle} 配置`}
-        description="支持 Excluded Models（每行一个；用 * 一键禁用全部模型）、Headers（JSON 对象）与 Models（name 或 name => alias）。"
+        description={
+          editKeyType === "vertex"
+            ? "Vertex 的 models 必须填写 alias（name => alias）。Excluded Models 中使用 * 可一键禁用该配置。"
+            : "支持 Excluded Models（每行一个；用 * 一键禁用）、自定义 headers 与 models。"
+        }
         onClose={() => setEditKeyOpen(false)}
         footer={
           <div className="flex flex-wrap items-center gap-2">
-            {keyDraftError ? <span className="text-sm font-semibold text-rose-700 dark:text-rose-200">{keyDraftError}</span> : null}
+            {keyDraftError ? (
+              <span className="text-sm font-semibold text-rose-700 dark:text-rose-200">{keyDraftError}</span>
+            ) : null}
             <Button variant="secondary" onClick={() => setEditKeyOpen(false)}>
               取消
             </Button>
@@ -935,55 +1161,125 @@ export function ProvidersPage() {
           </div>
         }
       >
-        <div className="space-y-3">
-          <TextInput
-            value={keyDraft.apiKey}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, apiKey: e.currentTarget.value }))}
-            placeholder="apiKey"
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <ToggleSwitch
+              label="启用"
+              description={editKeyEnabled ? "当前：启用" : "当前：禁用（已写入 * 规则）"}
+              checked={editKeyEnabled}
+              onCheckedChange={editKeyEnabledToggle}
+            />
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">API Key</p>
+              <TextInput
+                value={keyDraft.apiKey}
+                onChange={(e) => setKeyDraft((prev) => ({ ...prev, apiKey: e.currentTarget.value }))}
+                placeholder="apiKey"
+              />
+              <div className="flex items-center justify-between text-xs text-slate-500 dark:text-white/55">
+                <span>展示：{maskApiKey(keyDraft.apiKey)}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void copyText(keyDraft.apiKey.trim())}
+                  disabled={!keyDraft.apiKey.trim()}
+                >
+                  <Copy size={14} />
+                  复制
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Prefix（可选）</p>
+              <TextInput
+                value={keyDraft.prefix}
+                onChange={(e) => setKeyDraft((prev) => ({ ...prev, prefix: e.currentTarget.value }))}
+                placeholder="prefix"
+              />
+              <p className="text-xs text-slate-500 dark:text-white/55">
+                用于区分多个 Key 的路由与统计来源；留空表示不设置。
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Base URL（可选）</p>
+              <TextInput
+                value={keyDraft.baseUrl}
+                onChange={(e) => setKeyDraft((prev) => ({ ...prev, baseUrl: e.currentTarget.value }))}
+                placeholder="baseUrl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Proxy URL（可选）</p>
+              <TextInput
+                value={keyDraft.proxyUrl}
+                onChange={(e) => setKeyDraft((prev) => ({ ...prev, proxyUrl: e.currentTarget.value }))}
+                placeholder="proxyUrl"
+              />
+            </div>
+          </div>
+
+          <KeyValueInputList
+            title="Headers（可选）"
+            entries={keyDraft.headersEntries}
+            onChange={(next) => setKeyDraft((prev) => ({ ...prev, headersEntries: next }))}
+            keyPlaceholder="Header 名称"
+            valuePlaceholder="Header 值"
           />
-          <TextInput
-            value={keyDraft.prefix}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, prefix: e.currentTarget.value }))}
-            placeholder="prefix（可选）"
+
+          <ModelInputList
+            title={editKeyType === "vertex" ? "Models（必填 alias：name => alias）" : "Models（可选）"}
+            entries={keyDraft.modelEntries}
+            onChange={(next) => setKeyDraft((prev) => ({ ...prev, modelEntries: next }))}
+            showPriority
+            showTestModel={false}
           />
-          <TextInput
-            value={keyDraft.baseUrl}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, baseUrl: e.currentTarget.value }))}
-            placeholder="baseUrl（可选）"
-          />
-          <TextInput
-            value={keyDraft.proxyUrl}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, proxyUrl: e.currentTarget.value }))}
-            placeholder="proxyUrl（可选）"
-          />
-          <textarea
-            value={keyDraft.excludedModelsText}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, excludedModelsText: e.currentTarget.value }))}
-            placeholder="excludedModels（每行一个；用 * 一键禁用）"
-            aria-label="excludedModels"
-            className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
-          />
-          <textarea
-            value={keyDraft.headersText}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, headersText: e.currentTarget.value }))}
-            placeholder="headers（JSON 对象，可选）"
-            aria-label="headers"
-            className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
-          />
-          <textarea
-            value={keyDraft.modelsText}
-            onChange={(e) => setKeyDraft((prev) => ({ ...prev, modelsText: e.currentTarget.value }))}
-            placeholder="models（每行一个：name 或 name => alias）"
-            aria-label="models"
-            className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
-          />
+
+          <section className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Excluded Models（可选）</p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => editKeyEnabledToggle(false)}
+                >
+                  写入 * 禁用
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setKeyDraft((prev) => ({ ...prev, excludedModelsText: "" }))}
+                >
+                  清空
+                </Button>
+              </div>
+            </div>
+            <textarea
+              value={keyDraft.excludedModelsText}
+              onChange={(e) => setKeyDraft((prev) => ({ ...prev, excludedModelsText: e.currentTarget.value }))}
+              placeholder="每行一个模型；写 * 表示禁用全部模型"
+              aria-label="excludedModels"
+              className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
+            />
+            <p className="text-xs text-slate-500 dark:text-white/55">
+              当前排除：{editKeyExcludedCount} 条（不含 *）。
+            </p>
+          </section>
         </div>
       </Modal>
 
       <Modal
         open={editOpenAIOpen}
         title={`${editOpenAIIndex === null ? "新增" : "编辑"} OpenAI 提供商`}
-        description="配置 name/baseUrl、多个 apiKeyEntries、headers 与模型别名。"
+        description="配置 name/baseUrl、多个 apiKeyEntries、headers 与模型别名；支持通过 /models 自动拉取并合并。"
         onClose={() => setEditOpenAIOpen(false)}
         footer={
           <div className="flex flex-wrap items-center gap-2">
@@ -1000,44 +1296,69 @@ export function ProvidersPage() {
           </div>
         }
       >
-        <div className="space-y-3">
-          <TextInput
-            value={openaiDraft.name}
-            onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, name: e.currentTarget.value }))}
-            placeholder="name"
-          />
-          <TextInput
-            value={openaiDraft.baseUrl}
-            onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, baseUrl: e.currentTarget.value }))}
-            placeholder="baseUrl"
-          />
-          <TextInput
-            value={openaiDraft.prefix}
-            onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, prefix: e.currentTarget.value }))}
-            placeholder="prefix（可选）"
-          />
-          <div className="grid gap-2 md:grid-cols-2">
-            <TextInput
-              value={openaiDraft.priorityText}
-              onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, priorityText: e.currentTarget.value }))}
-              placeholder="priority（可选，数字）"
-              inputMode="numeric"
-            />
-            <TextInput
-              value={openaiDraft.testModel}
-              onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, testModel: e.currentTarget.value }))}
-              placeholder="test-model（可选）"
-            />
+        <div className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Name</p>
+              <TextInput
+                value={openaiDraft.name}
+                onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, name: e.currentTarget.value }))}
+                placeholder="name"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Base URL</p>
+              <TextInput
+                value={openaiDraft.baseUrl}
+                onChange={(e) =>
+                  setOpenaiDraft((prev) => ({
+                    ...prev,
+                    baseUrl: e.currentTarget.value,
+                  }))
+                }
+                placeholder="baseUrl"
+              />
+              <p className="text-xs text-slate-500 dark:text-white/55">
+                /models 拉取地址：{openaiDraft.baseUrl.trim() ? buildModelsEndpoint(openaiDraft.baseUrl) : "--"}
+              </p>
+            </div>
           </div>
-          <textarea
-            value={openaiDraft.headersText}
-            onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, headersText: e.currentTarget.value }))}
-            placeholder="headers（JSON 对象，可选）"
-            aria-label="OpenAI Provider headers"
-            className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Prefix（可选）</p>
+              <TextInput
+                value={openaiDraft.prefix}
+                onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, prefix: e.currentTarget.value }))}
+                placeholder="prefix"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Priority（可选）</p>
+              <TextInput
+                value={openaiDraft.priorityText}
+                onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, priorityText: e.currentTarget.value }))}
+                placeholder="数字"
+                inputMode="numeric"
+              />
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">Test Model（可选）</p>
+              <TextInput
+                value={openaiDraft.testModel}
+                onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, testModel: e.currentTarget.value }))}
+                placeholder="testModel"
+              />
+            </div>
+          </div>
+
+          <KeyValueInputList
+            title="Provider Headers（可选）"
+            entries={openaiDraft.headersEntries}
+            onChange={(next) => setOpenaiDraft((prev) => ({ ...prev, headersEntries: next }))}
           />
 
-          <div className="space-y-2 rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+          <section className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-900 dark:text-white">API Key Entries</p>
               <Button
@@ -1048,7 +1369,7 @@ export function ProvidersPage() {
                     ...prev,
                     apiKeyEntries: [
                       ...prev.apiKeyEntries,
-                      { id: `key-${Date.now()}`, apiKey: "", proxyUrl: "", headersText: "" },
+                      { id: `key-${Date.now()}`, apiKey: "", proxyUrl: "", headersEntries: [] },
                     ],
                   }))
                 }
@@ -1057,13 +1378,15 @@ export function ProvidersPage() {
                 新增
               </Button>
             </div>
+
             <div className="space-y-3">
               {openaiDraft.apiKeyEntries.map((entry, idx) => (
-                <div key={entry.id} className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950/70">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-white/55">
-                      Entry {idx + 1}
-                    </p>
+                <div
+                  key={entry.id}
+                  className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-900 dark:text-white">Key #{idx + 1}</p>
                     <Button
                       variant="danger"
                       size="sm"
@@ -1079,49 +1402,68 @@ export function ProvidersPage() {
                       删除
                     </Button>
                   </div>
-                  <div className="mt-3 grid gap-2 md:grid-cols-2">
-                    <TextInput
-                      value={entry.apiKey}
-                      onChange={(e) => {
-                        const value = e.currentTarget.value;
+
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">API Key</p>
+                      <TextInput
+                        value={entry.apiKey}
+                        onChange={(e) => {
+                          const value = e.currentTarget.value;
+                          setOpenaiDraft((prev) => ({
+                            ...prev,
+                            apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, apiKey: value } : it)),
+                          }));
+                        }}
+                        placeholder="apiKey"
+                      />
+                      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-white/55">
+                        <span>展示：{maskApiKey(entry.apiKey)}</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void copyText(entry.apiKey.trim())}
+                          disabled={!entry.apiKey.trim()}
+                        >
+                          <Copy size={14} />
+                          复制
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">Proxy URL（可选）</p>
+                      <TextInput
+                        value={entry.proxyUrl}
+                        onChange={(e) => {
+                          const value = e.currentTarget.value;
+                          setOpenaiDraft((prev) => ({
+                            ...prev,
+                            apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, proxyUrl: value } : it)),
+                          }));
+                        }}
+                        placeholder="proxyUrl"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <KeyValueInputList
+                      title="Key Headers（可选）"
+                      entries={entry.headersEntries}
+                      onChange={(next) => {
                         setOpenaiDraft((prev) => ({
                           ...prev,
-                          apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, apiKey: value } : it)),
+                          apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, headersEntries: next } : it)),
                         }));
                       }}
-                      placeholder="apiKey"
-                    />
-                    <TextInput
-                      value={entry.proxyUrl}
-                      onChange={(e) => {
-                        const value = e.currentTarget.value;
-                        setOpenaiDraft((prev) => ({
-                          ...prev,
-                          apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, proxyUrl: value } : it)),
-                        }));
-                      }}
-                      placeholder="proxyUrl（可选）"
                     />
                   </div>
-                  <textarea
-                    value={entry.headersText}
-                    onChange={(e) => {
-                      const value = e.currentTarget.value;
-                      setOpenaiDraft((prev) => ({
-                        ...prev,
-                        apiKeyEntries: prev.apiKeyEntries.map((it, i) => (i === idx ? { ...it, headersText: value } : it)),
-                      }));
-                    }}
-                    placeholder="headers（JSON 对象，可选）"
-                    aria-label={`OpenAI Entry ${idx + 1} headers`}
-                    className="mt-2 min-h-[90px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
-                  />
                 </div>
               ))}
             </div>
-          </div>
+          </section>
 
-          <div className="space-y-2">
+          <section className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-900 dark:text-white">Models</p>
               <div className="flex items-center gap-2">
@@ -1129,31 +1471,43 @@ export function ProvidersPage() {
                   <RefreshCw size={14} className={discovering ? "animate-spin" : ""} />
                   拉取 /models
                 </Button>
-                <Button variant="secondary" size="sm" onClick={applyDiscoveredModels} disabled={discoveredModels.length === 0}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={applyDiscoveredModels}
+                  disabled={discoveredModels.length === 0}
+                >
                   <Check size={14} />
                   合并所选
                 </Button>
               </div>
             </div>
-            <textarea
-              value={openaiDraft.modelsText}
-              onChange={(e) => setOpenaiDraft((prev) => ({ ...prev, modelsText: e.currentTarget.value }))}
-              placeholder="每行一个：name 或 name => alias"
-              aria-label="OpenAI Provider models"
-              className="min-h-[140px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
+
+            <ModelInputList
+              title="模型列表（可选）"
+              entries={openaiDraft.modelEntries}
+              onChange={(next) => setOpenaiDraft((prev) => ({ ...prev, modelEntries: next }))}
+              showPriority
+              showTestModel
             />
+
             {discoveredModels.length ? (
               <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
-                <p className="text-xs text-slate-600 dark:text-white/65">发现 {discoveredModels.length} 个模型（默认全选）</p>
+                <p className="text-xs text-slate-600 dark:text-white/65">
+                  发现 {discoveredModels.length} 个模型（默认全选）
+                </p>
                 <div className="mt-2 max-h-48 overflow-y-auto space-y-1">
                   {discoveredModels.map((model) => {
                     const checked = discoverSelected.has(model.id);
                     return (
                       <label
                         key={model.id}
-                        className={`flex cursor-pointer items-center gap-2 rounded-xl px-2 py-1 text-xs font-mono ${
-                          checked ? "bg-slate-900 text-white dark:bg-white dark:text-neutral-950" : "hover:bg-slate-50 dark:hover:bg-white/5"
-                        }`}
+                        className={[
+                          "flex cursor-pointer items-center gap-2 rounded-xl px-2 py-1 text-xs font-mono",
+                          checked
+                            ? "bg-slate-900 text-white dark:bg-white dark:text-neutral-950"
+                            : "hover:bg-slate-50 dark:hover:bg-white/5",
+                        ].join(" ")}
                       >
                         <input
                           type="checkbox"
@@ -1175,7 +1529,7 @@ export function ProvidersPage() {
                 </div>
               </div>
             ) : null}
-          </div>
+          </section>
         </div>
       </Modal>
 
@@ -1216,6 +1570,8 @@ function ProviderKeyListCard({
   onDelete,
   onToggleEnabled,
   onCopy,
+  getStats,
+  getStatusBar,
 }: {
   icon: typeof Globe;
   title: string;
@@ -1226,6 +1582,8 @@ function ProviderKeyListCard({
   onDelete: (index: number) => void;
   onToggleEnabled?: (index: number, enabled: boolean) => void;
   onCopy: (index: number) => void;
+  getStats: (item: ProviderSimpleConfig) => KeyStatBucket;
+  getStatusBar: (item: ProviderSimpleConfig) => StatusBarData;
 }) {
   return (
     <Card
@@ -1244,6 +1602,12 @@ function ProviderKeyListCard({
         <div className="space-y-3">
           {items.map((item, idx) => {
             const disabled = hasDisableAllModelsRule(item.excludedModels);
+            const headerEntries = Object.entries(item.headers || {});
+            const excludedModels = stripDisableAllModelsRule(item.excludedModels);
+            const models = item.models || [];
+            const stats = getStats(item);
+            const statusData = getStatusBar(item);
+
             return (
               <div
                 key={`${item.apiKey}:${idx}`}
@@ -1254,22 +1618,74 @@ function ProviderKeyListCard({
                     <p className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
                       <Icon size={16} className="text-slate-900 dark:text-white" />
                       <span className="truncate">{maskApiKey(item.apiKey)}</span>
+                      {disabled ? (
+                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-200">
+                          已禁用
+                        </span>
+                      ) : null}
                     </p>
-                    <p className="mt-1 truncate font-mono text-xs text-slate-700 dark:text-slate-200">
-                      prefix：{item.prefix || "--"} · baseUrl：{item.baseUrl || "--"}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-600 dark:text-white/65">
-                      excluded：{item.excludedModels?.length ?? 0} · models：{item.models?.length ?? 0} · headers：
-                      {item.headers ? Object.keys(item.headers).length : 0}
-                    </p>
+
+                    <div className="mt-1 space-y-1 text-xs text-slate-600 dark:text-white/65">
+                      <p className="truncate font-mono">prefix：{item.prefix || "--"}</p>
+                      <p className="truncate font-mono">baseUrl：{item.baseUrl || "--"}</p>
+                      {item.proxyUrl ? <p className="truncate font-mono">proxyUrl：{item.proxyUrl}</p> : null}
+                      <p className="tabular-nums">
+                        models：{models.length} · excluded：{excludedModels.length} · headers：{headerEntries.length} · 成功：{stats.success} · 失败：{stats.failure}
+                      </p>
+                    </div>
+
+                    {headerEntries.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {headerEntries.map(([k, v]) => (
+                          <span
+                            key={k}
+                            className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/75"
+                          >
+                            <span className="font-semibold">{k}:</span> {String(v)}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {models.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {models.map((model) => (
+                          <span
+                            key={model.name}
+                            className="rounded-full bg-slate-900 px-2 py-0.5 text-[11px] text-white dark:bg-white dark:text-neutral-950"
+                            title={model.alias && model.alias !== model.name ? `${model.name} => ${model.alias}` : model.name}
+                          >
+                            {model.alias && model.alias !== model.name ? `${model.name} → ${model.alias}` : model.name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    {excludedModels.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {excludedModels.map((model) => (
+                          <span
+                            key={model}
+                            className="rounded-full bg-rose-600/10 px-2 py-0.5 text-[11px] text-rose-700 dark:bg-rose-500/15 dark:text-rose-200"
+                          >
+                            {model}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <ProviderStatusBar data={statusData} />
                   </div>
+
                   <div className="flex flex-wrap items-center gap-2">
                     {onToggleEnabled ? (
-                      <ToggleSwitch
-                        label="启用"
-                        checked={!disabled}
-                        onCheckedChange={(enabled) => onToggleEnabled(idx, enabled)}
-                      />
+                      <div className="min-w-[140px]">
+                        <ToggleSwitch
+                          label="启用"
+                          checked={!disabled}
+                          onCheckedChange={(enabled) => onToggleEnabled(idx, enabled)}
+                        />
+                      </div>
                     ) : null}
                     <Button variant="secondary" size="sm" onClick={() => onCopy(idx)} title="复制 API Key">
                       <Copy size={14} />
