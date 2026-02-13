@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/modules/ui/Tabs";
 import { ToggleSwitch } from "@/modules/ui/ToggleSwitch";
 import { useToast } from "@/modules/ui/ToastProvider";
 import { HoverTooltip } from "@/modules/ui/Tooltip";
+import { YamlCodeEditor } from "@/modules/config/YamlCodeEditor";
 
 type ConfigTab = "visual" | "source" | "runtime";
 
@@ -576,6 +577,14 @@ export function ConfigPage() {
     return { current: searchIndex + 1, total: searchPositions.length };
   }, [lastSearchedQuery, searchIndex, searchPositions.length, searchQuery]);
 
+  const editorHighlight = useMemo(() => {
+    const q = lastSearchedQuery.trim();
+    if (!q) return null;
+    if (q !== searchQuery.trim()) return null;
+    if (!searchPositions.length) return null;
+    return { query: q, positions: searchPositions, activeIndex: searchIndex };
+  }, [lastSearchedQuery, searchIndex, searchPositions, searchQuery]);
+
   const getStatusText = () => {
     if (!online) return "离线";
     if (loading) return "加载中…";
@@ -789,19 +798,19 @@ export function ConfigPage() {
                         </div>
                       </div>
 
-                      <textarea
+                      <YamlCodeEditor
                         ref={textareaRef}
                         value={yamlText}
-                        onChange={(e) => {
-                          setYamlText(e.currentTarget.value);
+                        onChange={(next) => {
+                          setYamlText(next);
                           setYamlDirty(true);
                           setSearchPositions([]);
                           setSearchIndex(0);
                           setLastSearchedQuery("");
                         }}
-                        className="min-h-[60vh] w-full resize-y rounded-2xl border border-slate-200 bg-white px-4 py-3 font-mono text-xs text-slate-900 outline-none transition focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:focus-visible:ring-white/15"
-                        spellCheck={false}
-                        aria-label="config.yaml 编辑器"
+                        disabled={disableControls || loading}
+                        ariaLabel="config.yaml 编辑器"
+                        highlight={editorHighlight}
                       />
                     </div>
                   )}
