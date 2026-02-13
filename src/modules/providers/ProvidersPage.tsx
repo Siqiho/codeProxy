@@ -797,6 +797,14 @@ export function ProvidersPage() {
     return stripDisableAllModelsRule(list).length;
   }, [keyDraft.excludedModelsText]);
 
+  const editKeyHeaderCount = useMemo(() => {
+    return keyDraft.headersEntries.filter((e) => e.key.trim() && e.value.trim()).length;
+  }, [keyDraft.headersEntries]);
+
+  const editKeyModelCount = useMemo(() => {
+    return keyDraft.modelEntries.filter((e) => e.name.trim()).length;
+  }, [keyDraft.modelEntries]);
+
   return (
     <div className="space-y-6">
       <Card
@@ -822,7 +830,7 @@ export function ProvidersPage() {
             <TabsTrigger value="ampcode">Ampcode</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="gemini">
+          <TabsContent value="gemini" className="mt-4">
             <ProviderKeyListCard
               icon={Globe}
               title="Gemini Keys"
@@ -838,7 +846,7 @@ export function ProvidersPage() {
             />
           </TabsContent>
 
-          <TabsContent value="claude">
+          <TabsContent value="claude" className="mt-4">
             <ProviderKeyListCard
               icon={Bot}
               title="Claude Keys"
@@ -854,7 +862,7 @@ export function ProvidersPage() {
             />
           </TabsContent>
 
-          <TabsContent value="codex">
+          <TabsContent value="codex" className="mt-4">
             <ProviderKeyListCard
               icon={FileKey}
               title="Codex Keys"
@@ -870,7 +878,7 @@ export function ProvidersPage() {
             />
           </TabsContent>
 
-          <TabsContent value="vertex">
+          <TabsContent value="vertex" className="mt-4">
             <ProviderKeyListCard
               icon={Database}
               title="Vertex Keys"
@@ -885,7 +893,7 @@ export function ProvidersPage() {
             />
           </TabsContent>
 
-          <TabsContent value="openai">
+          <TabsContent value="openai" className="mt-4">
             <Card
               title="OpenAI 兼容提供商"
               description="多密钥、headers、模型别名与 /models 发现。"
@@ -1032,7 +1040,7 @@ export function ProvidersPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="ampcode">
+          <TabsContent value="ampcode" className="mt-4">
             <Card
               title="Ampcode 集成"
               description="配置上游 URL / API Key、模型映射与强制映射开关。"
@@ -1162,6 +1170,32 @@ export function ProvidersPage() {
         }
       >
         <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={
+                editKeyEnabled
+                  ? "rounded-full bg-emerald-600/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-200"
+                  : "rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:text-amber-200"
+              }
+            >
+              {editKeyEnabled ? "已启用" : "已禁用"}
+            </span>
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/75">
+              headers：<span className="font-semibold tabular-nums">{editKeyHeaderCount}</span>
+            </span>
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/75">
+              models：<span className="font-semibold tabular-nums">{editKeyModelCount}</span>
+            </span>
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-700 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/75">
+              excluded：<span className="font-semibold tabular-nums">{editKeyExcludedCount}</span>
+            </span>
+            {editKeyType === "vertex" ? (
+              <span className="rounded-full bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white dark:bg-white dark:text-neutral-950">
+                Vertex：需要 alias
+              </span>
+            ) : null}
+          </div>
+
           <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
             <ToggleSwitch
               label="启用"
@@ -1169,89 +1203,120 @@ export function ProvidersPage() {
               checked={editKeyEnabled}
               onCheckedChange={editKeyEnabledToggle}
             />
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              禁用本质是向 Excluded Models 写入 <span className="font-mono">*</span>；你也可以在下方手动编辑。
+            </p>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-2">
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-900 dark:text-white">API Key</p>
+              <span className="text-xs text-slate-500 dark:text-white/55">展示：{maskApiKey(keyDraft.apiKey)}</span>
+            </div>
+            <div className="mt-2">
               <TextInput
                 value={keyDraft.apiKey}
                 onChange={(e) => setKeyDraft((prev) => ({ ...prev, apiKey: e.currentTarget.value }))}
-                placeholder="apiKey"
+                placeholder="粘贴 API Key"
+                endAdornment={
+                  <button
+                    type="button"
+                    onClick={() => void copyText(keyDraft.apiKey.trim())}
+                    disabled={!keyDraft.apiKey.trim()}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white/80 text-slate-700 shadow-sm transition hover:bg-white disabled:opacity-50 dark:border-neutral-800 dark:bg-neutral-950/70 dark:text-slate-200 dark:hover:bg-neutral-950"
+                    aria-label="复制 API Key"
+                    title="复制"
+                  >
+                    <Copy size={14} />
+                  </button>
+                }
               />
-              <div className="flex items-center justify-between text-xs text-slate-500 dark:text-white/55">
-                <span>展示：{maskApiKey(keyDraft.apiKey)}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void copyText(keyDraft.apiKey.trim())}
-                  disabled={!keyDraft.apiKey.trim()}
-                >
-                  <Copy size={14} />
-                  复制
-                </Button>
-              </div>
             </div>
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              建议只粘贴纯 Key；如果粘贴包含其他文本，统计来源可能不一致。
+            </p>
+          </div>
 
-            <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900 dark:text-white">Prefix（可选）</p>
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <p className="text-sm font-semibold text-slate-900 dark:text-white">路由标识（Prefix，可选）</p>
+            <div className="mt-2">
               <TextInput
                 value={keyDraft.prefix}
                 onChange={(e) => setKeyDraft((prev) => ({ ...prev, prefix: e.currentTarget.value }))}
-                placeholder="prefix"
+                placeholder="例如：team-a"
               />
-              <p className="text-xs text-slate-500 dark:text-white/55">
-                用于区分多个 Key 的路由与统计来源；留空表示不设置。
+            </div>
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              Prefix 既用于路由，也用于使用统计来源匹配；设置后更容易区分多条 Key。
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <p className="text-sm font-semibold text-slate-900 dark:text-white">连接与代理（可选）</p>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-700 dark:text-white/75">Base URL</p>
+                <TextInput
+                  value={keyDraft.baseUrl}
+                  onChange={(e) => setKeyDraft((prev) => ({ ...prev, baseUrl: e.currentTarget.value }))}
+                  placeholder={editKeyType === "claude" ? "例如：https://api.anthropic.com" : "baseUrl"}
+                />
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-700 dark:text-white/75">Proxy URL</p>
+                <TextInput
+                  value={keyDraft.proxyUrl}
+                  onChange={(e) => setKeyDraft((prev) => ({ ...prev, proxyUrl: e.currentTarget.value }))}
+                  placeholder="proxyUrl"
+                />
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              Base URL 用于切换上游地址；Proxy URL 用于单 Key 走独立代理（如内网/隧道）。
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <KeyValueInputList
+              title="Headers（可选）"
+              entries={keyDraft.headersEntries}
+              onChange={(next) => setKeyDraft((prev) => ({ ...prev, headersEntries: next }))}
+              keyPlaceholder="Header 名称"
+              valuePlaceholder="Header 值"
+            />
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              常见：<span className="font-mono">x-api-key</span>、<span className="font-mono">anthropic-version</span>、自定义鉴权头等。
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+            <ModelInputList
+              title={editKeyType === "vertex" ? "Models（必须填写 alias：name => alias）" : "Models（可选）"}
+              entries={keyDraft.modelEntries}
+              onChange={(next) => setKeyDraft((prev) => ({ ...prev, modelEntries: next }))}
+              showPriority
+              showTestModel={false}
+            />
+            {editKeyType === "vertex" ? (
+              <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+                Vertex 需要把“下游模型名”映射成 Vertex 可识别的名称，所以每条都必须填 alias。
               </p>
-            </div>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+                不填写则使用默认路由；填写后可实现模型别名、优先级等高级路由。
+              </p>
+            )}
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900 dark:text-white">Base URL（可选）</p>
-              <TextInput
-                value={keyDraft.baseUrl}
-                onChange={(e) => setKeyDraft((prev) => ({ ...prev, baseUrl: e.currentTarget.value }))}
-                placeholder="baseUrl"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900 dark:text-white">Proxy URL（可选）</p>
-              <TextInput
-                value={keyDraft.proxyUrl}
-                onChange={(e) => setKeyDraft((prev) => ({ ...prev, proxyUrl: e.currentTarget.value }))}
-                placeholder="proxyUrl"
-              />
-            </div>
-          </div>
-
-          <KeyValueInputList
-            title="Headers（可选）"
-            entries={keyDraft.headersEntries}
-            onChange={(next) => setKeyDraft((prev) => ({ ...prev, headersEntries: next }))}
-            keyPlaceholder="Header 名称"
-            valuePlaceholder="Header 值"
-          />
-
-          <ModelInputList
-            title={editKeyType === "vertex" ? "Models（必填 alias：name => alias）" : "Models（可选）"}
-            entries={keyDraft.modelEntries}
-            onChange={(next) => setKeyDraft((prev) => ({ ...prev, modelEntries: next }))}
-            showPriority
-            showTestModel={false}
-          />
-
-          <section className="space-y-2">
+          <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-sm font-semibold text-slate-900 dark:text-white">Excluded Models（可选）</p>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => editKeyEnabledToggle(false)}
-                >
+                <Button variant="secondary" size="sm" onClick={() => editKeyEnabledToggle(false)}>
                   写入 * 禁用
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => editKeyEnabledToggle(true)}>
+                  移除 *
                 </Button>
                 <Button
                   variant="secondary"
@@ -1262,17 +1327,19 @@ export function ProvidersPage() {
                 </Button>
               </div>
             </div>
+
             <textarea
               value={keyDraft.excludedModelsText}
               onChange={(e) => setKeyDraft((prev) => ({ ...prev, excludedModelsText: e.currentTarget.value }))}
               placeholder="每行一个模型；写 * 表示禁用全部模型"
               aria-label="excludedModels"
-              className="min-h-[120px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
+              className="mt-3 min-h-[140px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none transition placeholder:text-slate-400 focus-visible:ring-2 focus-visible:ring-slate-400/35 dark:border-neutral-800 dark:bg-neutral-950 dark:text-slate-100 dark:placeholder:text-neutral-500 dark:focus-visible:ring-white/15"
             />
-            <p className="text-xs text-slate-500 dark:text-white/55">
-              当前排除：{editKeyExcludedCount} 条（不含 *）。
+
+            <p className="mt-2 text-xs text-slate-500 dark:text-white/55">
+              当前排除：<span className="font-semibold tabular-nums">{editKeyExcludedCount}</span> 条（不含 *）。
             </p>
-          </section>
+          </div>
         </div>
       </Modal>
 
@@ -1679,10 +1746,11 @@ function ProviderKeyListCard({
 
                   <div className="flex flex-wrap items-center gap-2">
                     {onToggleEnabled ? (
-                      <div className="min-w-[140px]">
+                      <div className="inline-flex items-center gap-2">
+                        <span className="text-sm font-semibold leading-none text-slate-900 dark:text-white">启用</span>
                         <ToggleSwitch
-                          label="启用"
                           checked={!disabled}
+                          ariaLabel="启用"
                           onCheckedChange={(enabled) => onToggleEnabled(idx, enabled)}
                         />
                       </div>
