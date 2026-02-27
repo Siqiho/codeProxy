@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, Info, RefreshCw, Trash2 } from "lucide-react";
+import { Copy, RefreshCw, Trash2 } from "lucide-react";
 import { AUTH_STORAGE_KEY } from "@/lib/constants";
 import { configApi } from "@/lib/http/apis";
 import { useAuth } from "@/modules/auth/AuthProvider";
 import { Button } from "@/modules/ui/Button";
-import { Card } from "@/modules/ui/Card";
 import { ConfirmModal } from "@/modules/ui/ConfirmModal";
-import { EmptyState } from "@/modules/ui/EmptyState";
 import { TextInput } from "@/modules/ui/Input";
 import { useToast } from "@/modules/ui/ToastProvider";
 
@@ -50,16 +48,17 @@ const copyToClipboard = async (value: string) => {
   try {
     await navigator.clipboard.writeText(value);
   } catch {
-    // 忽略复制失败
+    // ignore
   }
 };
+
+const AUTO_REFRESH_INTERVAL = 30_000;
 
 export function SystemPage() {
   const { notify } = useToast();
   const auth = useAuth();
 
   const [loadingConfig, setLoadingConfig] = useState(true);
-  const [configError, setConfigError] = useState<string | null>(null);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
 
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -80,14 +79,12 @@ export function SystemPage() {
 
   const loadConfig = useCallback(async () => {
     setLoadingConfig(true);
-    setConfigError(null);
     try {
       const data = await configApi.getConfig();
       const record = data && typeof data === "object" && !Array.isArray(data) ? data : null;
       setConfig(record);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "加载配置失败";
-      setConfigError(message);
+    } catch {
+      // silent
     } finally {
       setLoadingConfig(false);
     }
@@ -117,25 +114,36 @@ export function SystemPage() {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "加载模型失败";
       setModelsError(message);
-      notify({ type: "error", message });
     } finally {
       setModelsLoading(false);
     }
-  }, [modelsUrl, primaryApiKey, notify]);
+  }, [modelsUrl, primaryApiKey]);
 
+  // Auto-load config + models on mount
   useEffect(() => {
     void loadConfig();
   }, [loadConfig]);
+
+  useEffect(() => {
+    if (!loadingConfig && modelsUrl) {
+      void loadModels();
+    }
+  }, [loadingConfig, modelsUrl, loadModels]);
+
+  // Auto-refresh models every 30s
+  useEffect(() => {
+    if (!modelsUrl) return;
+    const timer = setInterval(() => {
+      void loadModels();
+    }, AUTO_REFRESH_INTERVAL);
+    return () => clearInterval(timer);
+  }, [modelsUrl, loadModels]);
 
   const filteredModels = useMemo(() => {
     const needle = modelFilter.trim().toLowerCase();
     if (!needle) return models;
     return models.filter((id) => id.toLowerCase().includes(needle));
   }, [modelFilter, models]);
-
-  const handleClearLoginStorage = () => {
-    setConfirm({ type: "clear-login" });
-  };
 
   const clearLoginStorage = () => {
     auth.actions.logout();
@@ -147,163 +155,123 @@ export function SystemPage() {
     notify({ type: "success", message: "已清理登录信息" });
   };
 
+  const infoRows: Array<{ label: string; value: string }> = [
+    { label: "API Base", value: auth.state.apiBase || "--" },
+    { label: "管理接口", value: auth.meta.managementEndpoint || "--" },
+    { label: "服务版本", value: auth.state.serverVersion ?? "--" },
+    { label: "构建时间", value: auth.state.serverBuildDate ?? "--" },
+    { label: "前端版本", value: __APP_VERSION__ || "--" },
+  ];
+
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="space-y-1">
-          <h2 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-white">
-            系统信息
-          </h2>
-          <p className="text-sm text-slate-600 dark:text-white/65">
-            连接信息、版本信息与模型列表（不改 UI 风格，只补齐业务能力）
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+        <h2 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-white">
+          系统
+        </h2>
+        <Button variant="danger" size="sm" onClick={() => setConfirm({ type: "clear-login" })}>
+          <Trash2 size={14} />
+          退出登录
+        </Button>
+      </div>
+
+      {/* Connection & Version Info */}
+      <div className="rounded-2xl border border-slate-200 bg-white/70 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3 dark:border-neutral-800">
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-white">连接与版本</h3>
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => void loadConfig()}
-            disabled={loadingConfig}
+            onClick={() => void copyToClipboard(auth.state.apiBase)}
           >
-            <RefreshCw size={14} />
-            刷新配置
+            <Copy size={14} />
+            复制地址
           </Button>
-          <Button variant="danger" size="sm" onClick={handleClearLoginStorage}>
-            <Trash2 size={14} />
-            清理登录信息
-          </Button>
+        </div>
+        <div className="divide-y divide-slate-100 dark:divide-neutral-800">
+          {infoRows.map((row) => (
+            <div
+              key={row.label}
+              className="flex items-center justify-between gap-4 px-5 py-2.5 text-sm"
+            >
+              <span className="text-slate-500 dark:text-white/55">{row.label}</span>
+              <span className="truncate font-mono text-xs text-slate-800 dark:text-white/80">
+                {row.value}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
 
-      {configError ? (
-        <EmptyState
-          title="加载失败"
-          description={configError}
-          icon={<Info size={18} />}
-          action={
-            <Button variant="secondary" onClick={() => void loadConfig()}>
-              <RefreshCw size={14} />
-              重试
-            </Button>
-          }
-        />
-      ) : null}
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card
-          title="连接与版本"
-          description="用于确认连接状态与后端版本，便于排查环境问题。"
-          actions={
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void copyToClipboard(auth.state.apiBase)}
-            >
-              <Copy size={14} />
-              复制 API Base
-            </Button>
-          }
-        >
-          <div className="space-y-3 text-sm text-slate-700 dark:text-white/80">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-slate-500 dark:text-white/55">API Base</span>
-              <span className="font-mono text-xs">{auth.state.apiBase || "--"}</span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-slate-500 dark:text-white/55">管理接口</span>
-              <span className="font-mono text-xs">{auth.meta.managementEndpoint || "--"}</span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-slate-500 dark:text-white/55">服务版本</span>
-              <span className="font-mono text-xs">{auth.state.serverVersion ?? "--"}</span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-slate-500 dark:text-white/55">构建时间</span>
-              <span className="font-mono text-xs">{auth.state.serverBuildDate ?? "--"}</span>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-slate-500 dark:text-white/55">前端版本</span>
-              <span className="font-mono text-xs">{__APP_VERSION__ || "--"}</span>
-            </div>
+      {/* Model List */}
+      <div className="rounded-2xl border border-slate-200 bg-white/70 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3 dark:border-neutral-800">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-white">可用模型</h3>
+            <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-300">
+              {filteredModels.length}
+            </span>
           </div>
-        </Card>
-
-        <Card
-          title="模型列表（/v1/models）"
-          description="从代理服务读取可用模型列表。若服务要求 API Key，会使用配置中的第一个 key。"
-          actions={
+          <div className="flex items-center gap-2">
+            <TextInput
+              value={modelFilter}
+              onChange={(event) => setModelFilter(event.target.value)}
+              placeholder="搜索模型…"
+              className="!w-44 !rounded-lg !py-1 !text-xs"
+            />
             <Button
               variant="secondary"
               size="sm"
               onClick={() => void loadModels()}
-              disabled={modelsLoading || loadingConfig}
+              disabled={modelsLoading}
             >
-              <RefreshCw size={14} />
-              刷新模型
+              <RefreshCw size={14} className={modelsLoading ? "animate-spin" : ""} />
+              刷新
             </Button>
-          }
-        >
-          <div className="space-y-3">
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="space-y-1">
-                <div className="text-xs text-slate-500 dark:text-white/55">模型筛选</div>
-                <TextInput
-                  value={modelFilter}
-                  onChange={(event) => setModelFilter(event.target.value)}
-                  placeholder="例如：gpt / claude / gemini"
-                />
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white/80">
-                <div className="text-xs text-slate-500 dark:text-white/55">API Keys</div>
-                <div className="mt-1 font-mono text-xs">
-                  {loadingConfig ? "加载中…" : primaryApiKey ? "已配置（隐藏）" : "未配置"}
-                </div>
-              </div>
-            </div>
-
-            {modelsError ? (
-              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
-                {modelsError}
-              </div>
-            ) : null}
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
-              <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-white/55">
-                <span>共 {filteredModels.length} 个</span>
-                <span className="font-mono">{modelsUrl || "--"}</span>
-              </div>
-              <div className="mt-3 max-h-80 overflow-auto">
-                {modelsLoading ? (
-                  <div className="py-6 text-center text-sm text-slate-600 dark:text-white/65">
-                    加载中…
-                  </div>
-                ) : filteredModels.length ? (
-                  <ul className="space-y-1">
-                    {filteredModels.map((id) => (
-                      <li
-                        key={id}
-                        className="rounded-xl px-2 py-1 font-mono text-xs text-slate-800 hover:bg-slate-50 dark:text-white/85 dark:hover:bg-white/5"
-                      >
-                        {id}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="py-6 text-center text-sm text-slate-600 dark:text-white/65">
-                    暂无模型数据
-                  </div>
-                )}
-              </div>
-            </div>
           </div>
-        </Card>
+        </div>
+
+        {modelsError ? (
+          <div className="border-b border-rose-100 bg-rose-50 px-5 py-2.5 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200">
+            {modelsError}
+          </div>
+        ) : null}
+
+        <div className="max-h-[420px] overflow-y-auto">
+          {modelsLoading && models.length === 0 ? (
+            <div className="py-8 text-center text-sm text-slate-500 dark:text-white/50">
+              加载中…
+            </div>
+          ) : filteredModels.length > 0 ? (
+            <div className="divide-y divide-slate-50 dark:divide-neutral-800/50">
+              {filteredModels.map((id, idx) => (
+                <div
+                  key={id}
+                  className="flex items-center gap-3 px-5 py-2 text-sm hover:bg-slate-50/50 dark:hover:bg-white/[0.02]"
+                >
+                  <span className="w-8 text-right tabular-nums text-xs text-slate-400 dark:text-white/30">
+                    {idx + 1}
+                  </span>
+                  <span className="truncate font-mono text-xs text-slate-800 dark:text-white/85">
+                    {id}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-sm text-slate-500 dark:text-white/50">
+              {models.length === 0 ? "暂无模型数据" : "无匹配结果"}
+            </div>
+          )}
+        </div>
       </div>
 
       <ConfirmModal
         open={confirm?.type === "clear-login"}
-        title="确认清理登录信息？"
+        title="确认退出登录？"
         description="此操作会退出登录并清理本地存储的连接信息。"
-        confirmText="清理"
+        confirmText="确认退出"
         cancelText="取消"
         variant="danger"
         onClose={() => setConfirm(null)}
