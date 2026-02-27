@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { Filter, RefreshCw, ScrollText, Search } from "lucide-react";
-import { usageApi } from "@/lib/http/apis";
+import { providersApi, usageApi } from "@/lib/http/apis";
 import { apiKeyEntriesApi, apiKeysApi, type ApiKeyEntry } from "@/lib/http/apis/api-keys";
 import type { UsageData } from "@/lib/http/types";
 import { TextInput } from "@/modules/ui/Input";
@@ -24,6 +24,7 @@ interface LogRow {
   timestampMs: number;
   apiKey: string;
   apiKeyName: string;
+  channelName: string;
   maskedApiKey: string;
   model: string;
   failed: boolean;
@@ -248,7 +249,8 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             <tr className="h-11 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-white/55">
               <th className="w-52 border-b border-slate-200 px-4 dark:border-neutral-800">时间</th>
               <th className="w-32 border-b border-slate-200 px-4 dark:border-neutral-800">Key 名称</th>
-              <th className="w-64 border-b border-slate-200 px-4 dark:border-neutral-800">模型</th>
+              <th className="w-56 border-b border-slate-200 px-4 dark:border-neutral-800">模型</th>
+              <th className="w-32 border-b border-slate-200 px-4 dark:border-neutral-800">渠道名</th>
               <th className="w-20 border-b border-slate-200 px-4 dark:border-neutral-800">状态</th>
               <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
                 用时
@@ -268,7 +270,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             {!loading && rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={9}
                   className="px-4 py-12 text-center text-sm text-slate-600 dark:text-white/70"
                 >
                   暂无数据
@@ -277,7 +279,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             ) : (
               <>
                 <tr aria-hidden="true">
-                  <td colSpan={8} height={topSpacerHeight} className="p-0" />
+                  <td colSpan={9} height={topSpacerHeight} className="p-0" />
                 </tr>
                 {visibleRows.map((row) => (
                   <tr
@@ -304,6 +306,13 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                     <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
                       <OverflowTooltip content={row.model} className="block min-w-0">
                         <span className="block min-w-0 truncate">{row.model}</span>
+                      </OverflowTooltip>
+                    </td>
+                    <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
+                      <OverflowTooltip content={row.channelName || "--"} className="block min-w-0">
+                        <span className={`block min-w-0 truncate text-xs font-medium ${row.channelName ? "text-violet-600 dark:text-violet-400" : "text-slate-400 dark:text-white/30"}`}>
+                          {row.channelName || "--"}
+                        </span>
                       </OverflowTooltip>
                     </td>
                     <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
@@ -355,7 +364,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                   </tr>
                 ))}
                 <tr aria-hidden="true">
-                  <td colSpan={8} height={bottomSpacerHeight} className="p-0" />
+                  <td colSpan={9} height={bottomSpacerHeight} className="p-0" />
                 </tr>
               </>
             )}
@@ -373,6 +382,7 @@ export function RequestLogsPage() {
   const [loading, setLoading] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [keyEntries, setKeyEntries] = useState<ApiKeyEntry[]>([]);
+  const [providerNameMap, setProviderNameMap] = useState<Map<string, string>>(new Map());
 
   const [timeRange, setTimeRange] = useState<TimeRange>(7);
 
@@ -390,11 +400,22 @@ export function RequestLogsPage() {
     fetchInFlightRef.current = true;
     setLoading(true);
     try {
-      const [next, rawEntries, legacyKeys] = await Promise.all([
+      const [next, rawEntries, legacyKeys, gemini, claude, codex, vertex] = await Promise.all([
         usageApi.getUsage(),
         apiKeyEntriesApi.list().catch(() => [] as ApiKeyEntry[]),
         apiKeysApi.list().catch(() => [] as string[]),
+        providersApi.getGeminiKeys().catch(() => []),
+        providersApi.getClaudeConfigs().catch(() => []),
+        providersApi.getCodexConfigs().catch(() => []),
+        providersApi.getVertexConfigs().catch(() => []),
       ]);
+
+      // Build apiKey → channel name map from all provider configs
+      const channelMap = new Map<string, string>();
+      for (const cfg of [...gemini, ...claude, ...codex, ...vertex]) {
+        if (cfg.apiKey && cfg.name) channelMap.set(cfg.apiKey, cfg.name);
+      }
+      setProviderNameMap(channelMap);
 
       // Auto-migrate: old api-keys not in api-key-entries get merged
       let entries = rawEntries;
@@ -462,6 +483,7 @@ export function RequestLogsPage() {
             timestampMs,
             apiKey,
             apiKeyName: keyNameMap.get(apiKey) || "",
+            channelName: providerNameMap.get(apiKey) || "",
             maskedApiKey: maskApiKey(apiKey),
             model,
             failed: Boolean(detail.failed),
@@ -475,7 +497,7 @@ export function RequestLogsPage() {
     });
 
     return entries.sort((a, b) => b.timestampMs - a.timestampMs);
-  }, [timeRange, usage.apis, keyNameMap]);
+  }, [timeRange, usage.apis, keyNameMap, providerNameMap]);
 
   const filteredRows = useMemo(() => {
     const apiNeedle = deferredApiQuery.toLowerCase();
