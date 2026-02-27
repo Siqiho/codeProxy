@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronDown, X } from "lucide-react";
 
 export interface MultiSelectOption {
@@ -29,28 +30,59 @@ export function MultiSelect({
 }: MultiSelectProps) {
     const [open, setOpen] = useState(false);
     const [search, setSearch] = useState("");
-    const containerRef = useRef<HTMLDivElement>(null);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    const dropdownRef = useRef<HTMLDivElement>(null);
     const searchRef = useRef<HTMLInputElement>(null);
+    const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+
+    // Compute dropdown position from trigger bounding rect
+    const updatePosition = useCallback(() => {
+        if (!triggerRef.current) return;
+        const rect = triggerRef.current.getBoundingClientRect();
+        setDropdownStyle({
+            position: "fixed",
+            top: rect.bottom + 4,
+            left: rect.left,
+            width: rect.width,
+            zIndex: 99999,
+        });
+    }, []);
 
     // Close on outside click
     useEffect(() => {
         if (!open) return;
         const handler = (e: MouseEvent) => {
-            if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-                setOpen(false);
-                setSearch("");
-            }
+            const target = e.target as Node;
+            if (triggerRef.current?.contains(target)) return;
+            if (dropdownRef.current?.contains(target)) return;
+            setOpen(false);
+            setSearch("");
         };
         document.addEventListener("mousedown", handler);
         return () => document.removeEventListener("mousedown", handler);
     }, [open]);
 
-    // Focus search on open
+    // Focus search on open + update position
     useEffect(() => {
-        if (open && searchRef.current) {
-            searchRef.current.focus();
+        if (open) {
+            updatePosition();
+            if (searchRef.current) {
+                searchRef.current.focus();
+            }
         }
-    }, [open]);
+    }, [open, updatePosition]);
+
+    // Update position on scroll/resize while open
+    useEffect(() => {
+        if (!open) return;
+        const onUpdate = () => updatePosition();
+        window.addEventListener("scroll", onUpdate, true);
+        window.addEventListener("resize", onUpdate);
+        return () => {
+            window.removeEventListener("scroll", onUpdate, true);
+            window.removeEventListener("resize", onUpdate);
+        };
+    }, [open, updatePosition]);
 
     const filteredOptions = useMemo(() => {
         if (!search) return options;
@@ -91,10 +123,87 @@ export function MultiSelect({
         return map;
     }, [options]);
 
+    const dropdown = open ? createPortal(
+        <div
+            ref={dropdownRef}
+            style={dropdownStyle}
+            className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl shadow-black/10 dark:border-neutral-700 dark:bg-neutral-900 dark:shadow-black/30"
+        >
+            {searchable && (
+                <div className="border-b border-slate-100 px-3 py-2 dark:border-neutral-800">
+                    <input
+                        ref={searchRef}
+                        type="text"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="搜索模型..."
+                        className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400 dark:text-white dark:placeholder:text-white/30"
+                    />
+                </div>
+            )}
+            <div className="max-h-60 overflow-y-auto p-1">
+                {/* Select All option */}
+                <button
+                    type="button"
+                    onClick={selectAll}
+                    className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${value.length === 0
+                        ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
+                        : "text-slate-700 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5"
+                        }`}
+                >
+                    <div
+                        className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border ${value.length === 0
+                            ? "border-green-500 bg-green-500 dark:border-green-400 dark:bg-green-400"
+                            : "border-slate-300 dark:border-neutral-600"
+                            }`}
+                    >
+                        {value.length === 0 && <Check size={12} className="text-white dark:text-black" />}
+                    </div>
+                    <span className="font-medium">全部模型</span>
+                </button>
+
+                <div className="mx-3 my-1 h-px bg-slate-100 dark:bg-neutral-800" />
+
+                {filteredOptions.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-xs text-slate-400 dark:text-white/30">
+                        无匹配结果
+                    </div>
+                ) : (
+                    filteredOptions.map((opt) => {
+                        const checked = selectedSet.has(opt.value);
+                        return (
+                            <button
+                                key={opt.value}
+                                type="button"
+                                onClick={() => toggle(opt.value)}
+                                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${checked
+                                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-900/20 dark:text-indigo-300"
+                                    : "text-slate-700 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5"
+                                    }`}
+                            >
+                                <div
+                                    className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition ${checked
+                                        ? "border-indigo-500 bg-indigo-500 dark:border-indigo-400 dark:bg-indigo-400"
+                                        : "border-slate-300 dark:border-neutral-600"
+                                        }`}
+                                >
+                                    {checked && <Check size={12} className="text-white dark:text-black" />}
+                                </div>
+                                <span className="font-mono text-xs">{opt.label}</span>
+                            </button>
+                        );
+                    })
+                )}
+            </div>
+        </div>,
+        document.body,
+    ) : null;
+
     return (
-        <div ref={containerRef} className={`relative ${className}`}>
+        <div className={`relative ${className}`}>
             {/* Trigger */}
             <button
+                ref={triggerRef}
                 type="button"
                 disabled={disabled}
                 onClick={() => setOpen(!open)}
@@ -139,77 +248,7 @@ export function MultiSelect({
                 />
             </button>
 
-            {/* Dropdown */}
-            {open && (
-                <div className="absolute left-0 right-0 top-full z-[9999] mt-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl shadow-black/10 dark:border-neutral-700 dark:bg-neutral-900 dark:shadow-black/30">
-                    {searchable && (
-                        <div className="border-b border-slate-100 px-3 py-2 dark:border-neutral-800">
-                            <input
-                                ref={searchRef}
-                                type="text"
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                                placeholder="搜索模型..."
-                                className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400 dark:text-white dark:placeholder:text-white/30"
-                            />
-                        </div>
-                    )}
-                    <div className="max-h-60 overflow-y-auto p-1">
-                        {/* Select All option */}
-                        <button
-                            type="button"
-                            onClick={selectAll}
-                            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${value.length === 0
-                                ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                                : "text-slate-700 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5"
-                                }`}
-                        >
-                            <div
-                                className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border ${value.length === 0
-                                    ? "border-green-500 bg-green-500 dark:border-green-400 dark:bg-green-400"
-                                    : "border-slate-300 dark:border-neutral-600"
-                                    }`}
-                            >
-                                {value.length === 0 && <Check size={12} className="text-white dark:text-black" />}
-                            </div>
-                            <span className="font-medium">全部模型</span>
-                        </button>
-
-                        <div className="mx-3 my-1 h-px bg-slate-100 dark:bg-neutral-800" />
-
-                        {filteredOptions.length === 0 ? (
-                            <div className="px-3 py-4 text-center text-xs text-slate-400 dark:text-white/30">
-                                无匹配结果
-                            </div>
-                        ) : (
-                            filteredOptions.map((opt) => {
-                                const checked = selectedSet.has(opt.value);
-                                return (
-                                    <button
-                                        key={opt.value}
-                                        type="button"
-                                        onClick={() => toggle(opt.value)}
-                                        className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${checked
-                                            ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-900/20 dark:text-indigo-300"
-                                            : "text-slate-700 hover:bg-slate-50 dark:text-white/70 dark:hover:bg-white/5"
-                                            }`}
-                                    >
-                                        <div
-                                            className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition ${checked
-                                                ? "border-indigo-500 bg-indigo-500 dark:border-indigo-400 dark:bg-indigo-400"
-                                                : "border-slate-300 dark:border-neutral-600"
-                                                }`}
-                                        >
-                                            {checked && <Check size={12} className="text-white dark:text-black" />}
-                                        </div>
-                                        <span className="font-mono text-xs">{opt.label}</span>
-                                    </button>
-                                );
-                            })
-                        )}
-                    </div>
-                </div>
-            )}
+            {dropdown}
         </div>
     );
 }
