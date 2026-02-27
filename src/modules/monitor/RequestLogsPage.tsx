@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Filter, RefreshCw, ScrollText, Search } from "lucide-react";
 import { usageApi } from "@/lib/http/apis";
-import { apiKeyEntriesApi, type ApiKeyEntry } from "@/lib/http/apis/api-keys";
+import { apiKeyEntriesApi, apiKeysApi, type ApiKeyEntry } from "@/lib/http/apis/api-keys";
 import type { UsageData } from "@/lib/http/types";
 import { TextInput } from "@/modules/ui/Input";
 import { useToast } from "@/modules/ui/ToastProvider";
@@ -390,28 +390,27 @@ export function RequestLogsPage() {
     fetchInFlightRef.current = true;
     setLoading(true);
     try {
-      const [next, entries] = await Promise.all([
+      const [next, rawEntries, legacyKeys] = await Promise.all([
         usageApi.getUsage(),
-        apiKeyEntriesApi.list().catch((err) => {
-          console.warn("[RequestLogs] Failed to load API key entries for name resolution:", err);
-          return [] as ApiKeyEntry[];
-        }),
+        apiKeyEntriesApi.list().catch(() => [] as ApiKeyEntry[]),
+        apiKeysApi.list().catch(() => [] as string[]),
       ]);
+
+      // Auto-migrate: old api-keys not in api-key-entries get merged
+      let entries = rawEntries;
+      const entryKeySet = new Set(rawEntries.map((e) => e.key));
+      const newEntries = legacyKeys
+        .filter((k) => k && !entryKeySet.has(k))
+        .map((k): ApiKeyEntry => ({ key: k, "created-at": new Date().toISOString() }));
+      if (newEntries.length > 0) {
+        entries = [...rawEntries, ...newEntries];
+        // Save merged entries back (fire-and-forget)
+        apiKeyEntriesApi.replace(entries).catch(() => { });
+      }
+
       setUsage(next);
       setKeyEntries(entries);
       setLastUpdatedAt(Date.now());
-
-      // Log key name resolution results (concise)
-      if (entries.length === 0) {
-        console.warn("[RequestLogs] No API key entries loaded — key names will not be displayed");
-      } else {
-        const apiKeys = Object.keys(next.apis ?? {});
-        const entryKeys = new Set(entries.map((e) => e.key));
-        const matched = apiKeys.filter((k) => entryKeys.has(k));
-        if (matched.length === 0 && apiKeys.length > 0) {
-          console.warn(`[RequestLogs] 0/${apiKeys.length} usage keys matched entries — visit API Keys page to auto-import`);
-        }
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "请求日志刷新失败";
       notify({ type: "error", message });
