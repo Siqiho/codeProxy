@@ -242,12 +242,13 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
         onScroll={onScroll}
         className="h-[calc(100vh-520px)] min-h-[360px] overflow-auto"
       >
-        <table className="w-full min-w-[1100px] table-fixed border-separate border-spacing-0 text-sm">
+        <table className="w-full min-w-[1200px] table-fixed border-separate border-spacing-0 text-sm">
           <caption className="sr-only">请求日志表格</caption>
           <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur dark:bg-neutral-950/75">
             <tr className="h-11 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-white/55">
-              <th className="w-56 border-b border-slate-200 px-4 dark:border-neutral-800">时间</th>
-              <th className="w-80 border-b border-slate-200 px-4 dark:border-neutral-800">模型</th>
+              <th className="w-52 border-b border-slate-200 px-4 dark:border-neutral-800">时间</th>
+              <th className="w-32 border-b border-slate-200 px-4 dark:border-neutral-800">Key 名称</th>
+              <th className="w-64 border-b border-slate-200 px-4 dark:border-neutral-800">模型</th>
               <th className="w-20 border-b border-slate-200 px-4 dark:border-neutral-800">状态</th>
               <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
                 用时
@@ -267,7 +268,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             {!loading && rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={8}
                   className="px-4 py-12 text-center text-sm text-slate-600 dark:text-white/70"
                 >
                   暂无数据
@@ -276,7 +277,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             ) : (
               <>
                 <tr aria-hidden="true">
-                  <td colSpan={7} height={topSpacerHeight} className="p-0" />
+                  <td colSpan={8} height={topSpacerHeight} className="p-0" />
                 </tr>
                 {visibleRows.map((row) => (
                   <tr
@@ -294,16 +295,15 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                       </OverflowTooltip>
                     </td>
                     <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
-                      <OverflowTooltip content={row.apiKeyName ? `${row.apiKeyName} / ${row.model}` : row.model} className="block min-w-0">
-                        <span className="block min-w-0 truncate">
-                          {row.apiKeyName ? (
-                            <>
-                              <span className="font-medium text-indigo-600 dark:text-indigo-400">{row.apiKeyName}</span>
-                              <span className="mx-1 text-slate-300 dark:text-white/20">/</span>
-                              {row.model}
-                            </>
-                          ) : row.model}
+                      <OverflowTooltip content={row.apiKeyName || "--"} className="block min-w-0">
+                        <span className={`block min-w-0 truncate text-xs font-medium ${row.apiKeyName ? "text-indigo-600 dark:text-indigo-400" : "text-slate-400 dark:text-white/30"}`}>
+                          {row.apiKeyName || "--"}
                         </span>
+                      </OverflowTooltip>
+                    </td>
+                    <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
+                      <OverflowTooltip content={row.model} className="block min-w-0">
+                        <span className="block min-w-0 truncate">{row.model}</span>
                       </OverflowTooltip>
                     </td>
                     <td className="border-b border-slate-100 px-4 align-middle dark:border-neutral-900">
@@ -355,7 +355,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                   </tr>
                 ))}
                 <tr aria-hidden="true">
-                  <td colSpan={7} height={bottomSpacerHeight} className="p-0" />
+                  <td colSpan={8} height={bottomSpacerHeight} className="p-0" />
                 </tr>
               </>
             )}
