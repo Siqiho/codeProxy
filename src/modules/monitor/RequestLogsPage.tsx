@@ -260,7 +260,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                 输入
               </th>
               <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
-                缓存命中
+                缓存读取
               </th>
               <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
                 输出
