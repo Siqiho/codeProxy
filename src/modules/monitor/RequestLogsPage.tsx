@@ -30,6 +30,7 @@ interface LogRow {
   failed: boolean;
   latencyText: string;
   inputTokens: number;
+  cachedTokens: number;
   outputTokens: number;
   totalTokens: number;
 }
@@ -243,7 +244,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
         onScroll={onScroll}
         className="h-[calc(100vh-520px)] min-h-[360px] overflow-auto"
       >
-        <table className="w-full min-w-[1200px] table-fixed border-separate border-spacing-0 text-sm">
+        <table className="w-full min-w-[1320px] table-fixed border-separate border-spacing-0 text-sm">
           <caption className="sr-only">请求日志表格</caption>
           <thead className="sticky top-0 z-10 bg-white/95 backdrop-blur dark:bg-neutral-950/75">
             <tr className="h-11 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-white/55">
@@ -259,6 +260,9 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                 输入
               </th>
               <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
+                缓存命中
+              </th>
+              <th className="w-24 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
                 输出
               </th>
               <th className="w-28 border-b border-slate-200 px-4 text-right dark:border-neutral-800">
@@ -270,7 +274,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             {!loading && rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={10}
                   className="px-4 py-12 text-center text-sm text-slate-600 dark:text-white/70"
                 >
                   暂无数据
@@ -279,7 +283,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
             ) : (
               <>
                 <tr aria-hidden="true">
-                  <td colSpan={9} height={topSpacerHeight} className="p-0" />
+                  <td colSpan={10} height={topSpacerHeight} className="p-0" />
                 </tr>
                 {visibleRows.map((row) => (
                   <tr
@@ -341,6 +345,16 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                         </span>
                       </OverflowTooltip>
                     </td>
+                    <td className="border-b border-slate-100 px-4 text-right align-middle font-mono text-xs tabular-nums dark:border-neutral-900">
+                      <OverflowTooltip
+                        content={row.cachedTokens.toLocaleString()}
+                        className="block min-w-0"
+                      >
+                        <span className={`block min-w-0 truncate ${row.cachedTokens > 0 ? "font-semibold text-amber-600 dark:text-amber-400" : "text-slate-400 dark:text-white/30"}`}>
+                          {row.cachedTokens > 0 ? row.cachedTokens.toLocaleString() : "0"}
+                        </span>
+                      </OverflowTooltip>
+                    </td>
                     <td className="border-b border-slate-100 px-4 text-right align-middle font-mono text-xs tabular-nums text-slate-700 dark:border-neutral-900 dark:text-slate-200">
                       <OverflowTooltip
                         content={row.outputTokens.toLocaleString()}
@@ -364,7 +378,7 @@ function VirtualRequestLogTable({ rows, loading }: { rows: readonly LogRow[]; lo
                   </tr>
                 ))}
                 <tr aria-hidden="true">
-                  <td colSpan={9} height={bottomSpacerHeight} className="p-0" />
+                  <td colSpan={10} height={bottomSpacerHeight} className="p-0" />
                 </tr>
               </>
             )}
@@ -489,6 +503,7 @@ export function RequestLogsPage() {
             failed: Boolean(detail.failed),
             latencyText: readLatencyText(detail),
             inputTokens,
+            cachedTokens,
             outputTokens,
             totalTokens,
           });

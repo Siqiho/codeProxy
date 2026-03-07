@@ -39,6 +39,7 @@ interface LogEntry {
   maskedKey: string;
   failed: boolean;
   inputTokens: number;
+  cachedTokens: number;
   outputTokens: number;
   totalTokens: number;
   authIndex: string;
@@ -322,6 +323,7 @@ export function RequestLogs({
             maskedKey: masked,
             failed: detail.failed,
             inputTokens: detail.tokens.input_tokens || 0,
+            cachedTokens: detail.tokens.cached_tokens || 0,
             outputTokens: detail.tokens.output_tokens || 0,
             totalTokens: detail.tokens.total_tokens || 0,
             authIndex: detail.auth_index || "",
@@ -492,6 +494,7 @@ export function RequestLogs({
         <td className={getRateClassName(rateValue, styles)}>{stats.successRate}%</td>
         <td>{formatNumber(stats.totalCount)}</td>
         <td>{formatNumber(entry.inputTokens)}</td>
+        <td style={{ color: entry.cachedTokens > 0 ? 'var(--color-warning, #d97706)' : undefined, fontWeight: entry.cachedTokens > 0 ? 600 : undefined }}>{entry.cachedTokens > 0 ? formatNumber(entry.cachedTokens) : '0'}</td>
         <td>{formatNumber(entry.outputTokens)}</td>
         <td>{formatNumber(entry.totalTokens)}</td>
         <td>{formatTimestamp(entry.timestamp)}</td>
@@ -637,6 +640,7 @@ export function RequestLogs({
                       <th>{t("monitor.logs.header_rate")}</th>
                       <th>{t("monitor.logs.header_count")}</th>
                       <th>{t("monitor.logs.header_input")}</th>
+                      <th>{t("monitor.logs.header_cache")}</th>
                       <th>{t("monitor.logs.header_output")}</th>
                       <th>{t("monitor.logs.header_total")}</th>
                       <th>{t("monitor.logs.header_time")}</th>

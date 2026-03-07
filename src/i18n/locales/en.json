@@ -1422,6 +1422,7 @@
       "header_rate": "Success Rate",
       "header_count": "Requests",
       "header_input": "Input",
+      "header_cache": "Cache Hit",
       "header_output": "Output",
       "header_total": "Total Tokens",
       "header_time": "Time",
