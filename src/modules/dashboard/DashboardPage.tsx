@@ -134,20 +134,27 @@ export function DashboardPage() {
           <Link
             to="/monitor"
             viewTransition
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
+            className="group rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
-            <div className="flex items-center gap-2 font-semibold">
-              <Activity size={16} />
-              监控中心
+            <div className="flex items-center justify-between font-semibold">
+              <span className="flex items-center gap-2">
+                <Activity size={16} />
+                监控中心
+              </span>
+              {kpi ? (
+                <span className="rounded-lg bg-emerald-50 px-2 py-0.5 text-xs font-semibold tabular-nums text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+                  {formatNumber(kpi.total_requests)}
+                </span>
+              ) : null}
             </div>
-            <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
-              KPI、图表、请求趋势与模型分布
+            <div className="mt-1 text-xs text-slate-500 dark:text-white/55">
+              {kpi ? `${range === 1 ? "今天" : `近 ${range} 天`}共 ${formatNumber(kpi.total_requests)} 次请求` : "KPI、图表、请求趋势与模型分布"}
             </div>
           </Link>
           <Link
             to="/ai-providers"
             viewTransition
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
+            className="group rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
             <div className="flex items-center justify-between font-semibold">
               <span className="flex items-center gap-2">
@@ -155,39 +162,39 @@ export function DashboardPage() {
                 AI 供应商
               </span>
               {counts ? (
-                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                <span className="rounded-lg bg-emerald-50 px-2 py-0.5 text-xs font-semibold tabular-nums text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
                   {counts.providers_total}
                 </span>
               ) : null}
             </div>
-            <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
-              配置/测试/禁用模型，查看 key 状态
+            <div className="mt-1 text-xs text-slate-500 dark:text-white/55">
+              {counts ? `已添加 ${counts.providers_total} 个供应渠道` : "配置/测试/禁用模型，查看 key 状态"}
             </div>
           </Link>
           <Link
             to="/api-keys"
             viewTransition
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
+            className="group rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
             <div className="flex items-center justify-between font-semibold">
               <span className="flex items-center gap-2">
                 <Sparkles size={16} />
-                API Keys 管理
+                API Keys
               </span>
               {counts ? (
-                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                <span className="rounded-lg bg-emerald-50 px-2 py-0.5 text-xs font-semibold tabular-nums text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
                   {counts.api_keys}
                 </span>
               ) : null}
             </div>
-            <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
-              创建/编辑 API Key，设置配额与模型权限
+            <div className="mt-1 text-xs text-slate-500 dark:text-white/55">
+              {counts ? `已设置 ${counts.api_keys} 个 API Key` : "创建/编辑 API Key，设置配额与模型权限"}
             </div>
           </Link>
           <Link
             to="/auth-files"
             viewTransition
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
+            className="group rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
             <div className="flex items-center justify-between font-semibold">
               <span className="flex items-center gap-2">
@@ -195,25 +202,25 @@ export function DashboardPage() {
                 认证文件
               </span>
               {counts ? (
-                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                <span className="rounded-lg bg-emerald-50 px-2 py-0.5 text-xs font-semibold tabular-nums text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
                   {counts.auth_files}
                 </span>
               ) : null}
             </div>
-            <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
-              管理 auth file、排除模型与别名
+            <div className="mt-1 text-xs text-slate-500 dark:text-white/55">
+              {counts ? `已管理 ${counts.auth_files} 个认证文件` : "管理 auth file、排除模型与别名"}
             </div>
           </Link>
           <Link
             to="/config"
             viewTransition
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
+            className="group rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
             <div className="flex items-center gap-2 font-semibold">
               <Settings size={16} />
               配置面板
             </div>
-            <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
+            <div className="mt-1 text-xs text-slate-500 dark:text-white/55">
               可视化/源码/运行时配置
             </div>
           </Link>
