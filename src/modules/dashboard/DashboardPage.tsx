@@ -1,21 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Activity, Bot, FileKey, RefreshCw, Settings, Sigma, Sparkles, TriangleAlert } from "lucide-react";
-import { usageApi } from "@/lib/http/apis";
-import type { UsageData } from "@/lib/http/types";
-import {
-  filterUsageByDays,
-  computeKpiMetrics,
-  formatNumber,
-  formatRate,
-} from "@/modules/monitor/monitor-utils";
+import { usageApi, type DashboardSummary } from "@/lib/http/apis/usage";
 import { KpiCard, MonitorCard } from "@/modules/monitor/MonitorPagePieces";
 import { Button } from "@/modules/ui/Button";
 import { EmptyState } from "@/modules/ui/EmptyState";
 import { Tabs, TabsList, TabsTrigger } from "@/modules/ui/Tabs";
 import { useToast } from "@/modules/ui/ToastProvider";
-
-const createEmptyUsage = (): UsageData => ({ apis: {} });
 
 type DashboardRange = 1 | 7 | 30;
 
@@ -25,24 +16,25 @@ const RANGE_OPTIONS: ReadonlyArray<{ value: DashboardRange; label: string }> = [
   { value: 30, label: "近 30 天" },
 ];
 
+const formatNumber = (n: number) =>
+  n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
+
+const formatRate = (rate: number) =>
+  `${rate.toFixed(2)}%`;
+
 export function DashboardPage() {
   const { notify } = useToast();
-  const [isPending, startTransition] = useTransition();
-  const [rawUsage, setRawUsage] = useState<UsageData>(createEmptyUsage);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [range, setRange] = useState<DashboardRange>(7);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (days: DashboardRange) => {
     setLoading(true);
     setError(null);
     try {
-      const usage = await usageApi.getUsage();
-      startTransition(() => {
-        setRawUsage(usage);
-
-      });
+      const data = await usageApi.getDashboardSummary(days);
+      setSummary(data);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "数据获取失败";
       setError(message);
@@ -53,12 +45,12 @@ export function DashboardPage() {
   }, [notify]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void refresh(range);
+  }, [refresh, range]);
 
-  const filteredUsage = useMemo(() => filterUsageByDays(rawUsage, range, ""), [rawUsage, range]);
-  const kpis = useMemo(() => computeKpiMetrics(filteredUsage), [filteredUsage]);
-  const isEmpty = kpis.requestCount === 0;
+  const kpi = summary?.kpi;
+  const counts = summary?.counts;
+  const isEmpty = !kpi || kpi.total_requests === 0;
 
   return (
     <div className="space-y-6">
@@ -83,10 +75,10 @@ export function DashboardPage() {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => void refresh()}
-            disabled={loading || isPending}
+            onClick={() => void refresh(range)}
+            disabled={loading}
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             刷新
           </Button>
         </div>
@@ -98,7 +90,7 @@ export function DashboardPage() {
           description={error}
           icon={<TriangleAlert size={18} />}
           action={
-            <Button variant="secondary" onClick={() => void refresh()}>
+            <Button variant="secondary" onClick={() => void refresh(range)}>
               <RefreshCw size={14} />
               重试
             </Button>
@@ -109,35 +101,34 @@ export function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           title="请求数"
-          value={<span className="tabular-nums">{formatNumber(kpis.requestCount)}</span>}
+          value={<span className="tabular-nums">{formatNumber(kpi?.total_requests ?? 0)}</span>}
           hint={`${range === 1 ? "今天" : `最近 ${range} 天`}的总请求数`}
           icon={Activity}
         />
         <KpiCard
           title="成功率"
-          value={<span className="tabular-nums">{formatRate(kpis.successRate)}</span>}
-          hint={`成功 ${formatNumber(kpis.successCount)} · 失败 ${formatNumber(kpis.failedCount)}`}
+          value={<span className="tabular-nums">{formatRate(kpi?.success_rate ?? 0)}</span>}
+          hint={`成功 ${formatNumber(kpi?.success_requests ?? 0)} · 失败 ${formatNumber(kpi?.failed_requests ?? 0)}`}
           icon={Sigma}
         />
         <KpiCard
           title="Token 总量"
-          value={<span className="tabular-nums">{formatNumber(kpis.totalTokens)}</span>}
-          hint={`输入 ${formatNumber(kpis.inputTokens)} · 输出 ${formatNumber(kpis.outputTokens)}`}
+          value={<span className="tabular-nums">{formatNumber(kpi?.total_tokens ?? 0)}</span>}
+          hint={`输入 ${formatNumber(kpi?.input_tokens ?? 0)} · 输出 ${formatNumber(kpi?.output_tokens ?? 0)}`}
           icon={Sigma}
         />
         <KpiCard
           title="失败请求"
-          value={<span className="tabular-nums">{formatNumber(kpis.failedCount)}</span>}
+          value={<span className="tabular-nums">{formatNumber(kpi?.failed_requests ?? 0)}</span>}
           hint="失败请求数（用于定位 provider/key 质量问题）"
           icon={TriangleAlert}
         />
       </div>
 
-
       <MonitorCard
         title="快捷入口"
         description={isEmpty ? "当前时间范围内暂无 usage 数据。" : "进入对应页面继续操作。"}
-        loading={loading || isPending}
+        loading={loading}
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <Link
@@ -158,12 +149,19 @@ export function DashboardPage() {
             viewTransition
             className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
-            <div className="flex items-center gap-2 font-semibold">
-              <Bot size={16} />
-              AI 供应商
+            <div className="flex items-center justify-between font-semibold">
+              <span className="flex items-center gap-2">
+                <Bot size={16} />
+                AI 供应商
+              </span>
+              {counts ? (
+                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                  {counts.providers_total}
+                </span>
+              ) : null}
             </div>
             <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
-              配置/测试/禁用模型、查看 key 状态
+              配置/测试/禁用模型，查看 key 状态
             </div>
           </Link>
           <Link
@@ -171,9 +169,16 @@ export function DashboardPage() {
             viewTransition
             className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
-            <div className="flex items-center gap-2 font-semibold">
-              <Sparkles size={16} />
-              API Keys 管理
+            <div className="flex items-center justify-between font-semibold">
+              <span className="flex items-center gap-2">
+                <Sparkles size={16} />
+                API Keys 管理
+              </span>
+              {counts ? (
+                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                  {counts.api_keys}
+                </span>
+              ) : null}
             </div>
             <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
               创建/编辑 API Key，设置配额与模型权限
@@ -184,9 +189,16 @@ export function DashboardPage() {
             viewTransition
             className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/60 dark:text-white dark:hover:bg-neutral-900"
           >
-            <div className="flex items-center gap-2 font-semibold">
-              <FileKey size={16} />
-              认证文件
+            <div className="flex items-center justify-between font-semibold">
+              <span className="flex items-center gap-2">
+                <FileKey size={16} />
+                认证文件
+              </span>
+              {counts ? (
+                <span className="rounded-lg bg-slate-100 px-1.5 py-0.5 text-xs font-medium tabular-nums text-slate-600 dark:bg-white/10 dark:text-white/65">
+                  {counts.auth_files}
+                </span>
+              ) : null}
             </div>
             <div className="mt-1 text-xs text-slate-600 dark:text-white/65">
               管理 auth file、排除模型与别名

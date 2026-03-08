@@ -44,4 +44,33 @@ export const usageApi = {
   importUsage(payload: unknown): Promise<UsageImportResponse> {
     return apiClient.post<UsageImportResponse>("/usage/import", payload);
   },
+
+  getDashboardSummary(days = 7): Promise<DashboardSummary> {
+    return apiClient.get<DashboardSummary>(`/dashboard-summary?days=${days}`);
+  },
 };
+
+export interface DashboardSummary {
+  kpi: {
+    total_requests: number;
+    success_requests: number;
+    failed_requests: number;
+    success_rate: number;
+    input_tokens: number;
+    output_tokens: number;
+    reasoning_tokens: number;
+    cached_tokens: number;
+    total_tokens: number;
+  };
+  counts: {
+    api_keys: number;
+    providers_total: number;
+    gemini_keys: number;
+    claude_keys: number;
+    codex_keys: number;
+    vertex_keys: number;
+    openai_providers: number;
+    auth_files: number;
+  };
+  days: number;
+}
