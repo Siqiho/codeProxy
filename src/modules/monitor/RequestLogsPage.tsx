@@ -463,7 +463,7 @@ export function RequestLogsPage() {
 
   const rows = useMemo<LogRow[]>(() => {
     const now = new Date();
-    const cutoffStart = new Date(now.getTime() - timeRange * 24 * 60 * 60 * 1000);
+    const cutoffStart = new Date(now.getTime() - (timeRange - 1) * 24 * 60 * 60 * 1000);
     cutoffStart.setHours(0, 0, 0, 0);
     const cutoffMs = cutoffStart.getTime();
 
