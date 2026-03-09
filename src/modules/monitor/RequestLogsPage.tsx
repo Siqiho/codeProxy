@@ -372,8 +372,8 @@ function toLogRow(
 export function RequestLogsPage() {
   const { notify } = useToast();
 
-  // Accumulated rows from all loaded pages
-  const [rows, setRows] = useState<LogRow[]>([]);
+  // Accumulated raw items from all loaded pages (name resolution happens in useMemo)
+  const [rawItems, setRawItems] = useState<UsageLogItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -465,12 +465,12 @@ export function RequestLogsPage() {
           status: statusFilter || undefined,
         });
 
-        const items = (resp.items ?? []).map((item) => toLogRow(item, keyNameMap, providerNameMap));
+        const newItems = resp.items ?? [];
 
         if (page === 1) {
-          setRows(items);
+          setRawItems(newItems);
         } else {
-          setRows((prev) => [...prev, ...items]);
+          setRawItems((prev) => [...prev, ...newItems]);
         }
 
         setTotalCount(resp.total ?? 0);
@@ -487,10 +487,16 @@ export function RequestLogsPage() {
         setLoadingMore(false);
       }
     },
-    [timeRange, apiQuery, modelQuery, statusFilter, keyNameMap, providerNameMap, notify],
+    [timeRange, apiQuery, modelQuery, statusFilter, notify],
   );
 
-  const hasMore = rows.length < totalCount;
+  // Derive display rows reactively from raw items + name maps
+  const rows = useMemo<LogRow[]>(
+    () => rawItems.map((item) => toLogRow(item, keyNameMap, providerNameMap)),
+    [rawItems, keyNameMap, providerNameMap],
+  );
+
+  const hasMore = rawItems.length < totalCount;
 
   const loadNextPage = useCallback(() => {
     if (hasMore && !loadingMore && !loading) {
