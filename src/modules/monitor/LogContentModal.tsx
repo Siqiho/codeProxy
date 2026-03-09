@@ -15,8 +15,12 @@ import {
     Zap,
     Upload,
     MessageSquare,
+    Copy,
+    Check,
 } from "lucide-react";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 /* ========================================================================== */
 /*  Types                                                                     */
@@ -126,10 +130,86 @@ const PROSE_CLASSES = `prose prose-sm dark:prose-invert max-w-none break-words l
   prose-strong:font-semibold
   prose-blockquote:border-l-2 prose-blockquote:border-slate-300 dark:prose-blockquote:border-neutral-600`;
 
+/* ---- macOS-style code block with syntax highlighting & copy ---- */
+
+function CodeBlock({ language, children }: { language: string; children: string }) {
+    const [copied, setCopied] = useState(false);
+    const handleCopy = () => {
+        navigator.clipboard.writeText(children).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
+    };
+    const displayLang = language || "text";
+
+    return (
+        <div className="group overflow-hidden rounded-xl border border-slate-200 dark:border-neutral-700 my-3">
+            {/* macOS title bar */}
+            <div className="flex items-center justify-between bg-slate-100 px-4 py-2 dark:bg-neutral-800">
+                <div className="flex items-center gap-3">
+                    {/* Traffic light dots */}
+                    <div className="flex items-center gap-1.5">
+                        <span className="inline-block h-3 w-3 rounded-full bg-[#FF5F57]" />
+                        <span className="inline-block h-3 w-3 rounded-full bg-[#FEBC2E]" />
+                        <span className="inline-block h-3 w-3 rounded-full bg-[#28C840]" />
+                    </div>
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400">{displayLang}</span>
+                </div>
+                <button
+                    type="button"
+                    onClick={handleCopy}
+                    className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-neutral-700 dark:hover:text-slate-300"
+                >
+                    {copied ? (
+                        <><Check size={13} className="text-emerald-500" /><span className="text-emerald-500">已复制</span></>
+                    ) : (
+                        <><Copy size={13} /><span>复制</span></>
+                    )}
+                </button>
+            </div>
+            {/* Code content */}
+            <SyntaxHighlighter
+                language={displayLang}
+                style={oneDark}
+                customStyle={{
+                    margin: 0,
+                    borderRadius: 0,
+                    fontSize: "13px",
+                    lineHeight: "1.6",
+                    padding: "16px",
+                }}
+                showLineNumbers={children.split("\n").length > 5}
+                wrapLongLines
+            >
+                {children.replace(/\n$/, "")}
+            </SyntaxHighlighter>
+        </div>
+    );
+}
+
+/* ---- Markdown components override for code rendering ---- */
+
+const markdownComponents: Partial<Components> = {
+    code({ className, children, ...props }) {
+        const match = /language-(\w+)/.exec(className || "");
+        const code = String(children).replace(/\n$/, "");
+        // Block code (has language or multiline)
+        if (match || code.includes("\n")) {
+            return <CodeBlock language={match?.[1] || ""} >{code}</CodeBlock>;
+        }
+        // Inline code
+        return <code className={className} {...props}>{children}</code>;
+    },
+    pre({ children }) {
+        // Let the code component handle rendering
+        return <>{children}</>;
+    },
+};
+
 function MarkdownBlock({ text }: { text: string }) {
     return (
         <div className={PROSE_CLASSES}>
-            <Markdown>{text}</Markdown>
+            <Markdown components={markdownComponents}>{text}</Markdown>
         </div>
     );
 }
@@ -431,10 +511,33 @@ function parseInputMessages(raw: string): Msg[] | null {
     if (result.length === 0) {
         const messagesMatch = raw.match(/"messages"\s*:\s*\[(.+)/s);
         if (messagesMatch) {
-            const rcRegex = /"role"\s*:\s*"(\w+)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"/gs;
+            const body = messagesMatch[1];
+            // Pattern 1: content is a string  "content":"..."
+            const rcStringRegex = /"role"\s*:\s*"(\w+)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"/gs;
             let match;
-            while ((match = rcRegex.exec(messagesMatch[1])) !== null) {
+            while ((match = rcStringRegex.exec(body)) !== null) {
                 result.push({ role: match[1], content: decodeEscaped(match[2]) });
+            }
+            // Pattern 2: content is an array (Claude format)  "content":[{"type":"text","text":"..."}]
+            if (result.length === 0) {
+                const rcArrayRegex = /"role"\s*:\s*"(\w+)"\s*,\s*"content"\s*:\s*\[/gs;
+                let roleMatch;
+                while ((roleMatch = rcArrayRegex.exec(body)) !== null) {
+                    const role = roleMatch[1];
+                    // Extract all "text":"..." values after this position
+                    const afterRole = body.slice(rcArrayRegex.lastIndex);
+                    const textRegex = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/gs;
+                    let textMatch;
+                    const texts: string[] = [];
+                    while ((textMatch = textRegex.exec(afterRole)) !== null) {
+                        // Stop if we hit another role (next message)
+                        if (afterRole.lastIndexOf('"role"', textMatch.index) > 0) break;
+                        texts.push(decodeEscaped(textMatch[1]));
+                    }
+                    if (texts.length > 0) {
+                        result.push({ role, content: texts.join("\n") });
+                    }
+                }
             }
         }
     }
