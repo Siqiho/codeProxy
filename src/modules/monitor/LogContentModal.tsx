@@ -114,21 +114,112 @@ function cleanContent(raw: string): string {
     return raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+/* ---- Prose wrapper for Markdown rendering ---- */
+const PROSE_CLASSES = `prose prose-sm dark:prose-invert max-w-none break-words leading-relaxed
+  prose-headings:mt-4 prose-headings:mb-2 prose-headings:font-semibold
+  prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
+  prose-p:my-2 prose-p:leading-relaxed
+  prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
+  prose-code:rounded-md prose-code:bg-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[13px] prose-code:font-mono prose-code:text-slate-700 prose-code:before:content-none prose-code:after:content-none
+  dark:prose-code:bg-neutral-800 dark:prose-code:text-slate-300
+  prose-pre:rounded-lg prose-pre:bg-slate-900 prose-pre:text-xs dark:prose-pre:bg-neutral-900
+  prose-strong:font-semibold
+  prose-blockquote:border-l-2 prose-blockquote:border-slate-300 dark:prose-blockquote:border-neutral-600`;
+
+function MarkdownBlock({ text }: { text: string }) {
+    return (
+        <div className={PROSE_CLASSES}>
+            <Markdown>{text}</Markdown>
+        </div>
+    );
+}
+
+/* ---- Collapsible section for XML-like tagged blocks ---- */
+
+function TagSection({ name, content, defaultExpanded = false }: { name: string; content: string; defaultExpanded?: boolean }) {
+    const [expanded, setExpanded] = useState(defaultExpanded);
+    return (
+        <div className="overflow-hidden rounded-lg border border-slate-200/80 dark:border-neutral-700/60">
+            <button
+                type="button"
+                onClick={() => setExpanded((prev) => !prev)}
+                className="flex w-full items-center gap-2 bg-slate-50 px-3.5 py-2 text-left text-xs font-medium text-slate-500 transition-colors hover:bg-slate-100 dark:bg-neutral-800/50 dark:text-slate-400 dark:hover:bg-neutral-800/80"
+            >
+                <code className="shrink-0 rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 dark:bg-neutral-700 dark:text-slate-300">
+                    &lt;{name}&gt;
+                </code>
+                <span className="flex-1" />
+                <ChevronDown
+                    size={14}
+                    className={`shrink-0 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}
+                />
+            </button>
+            {expanded && (
+                <div className="border-t border-inherit px-3.5 py-3 text-sm text-slate-800 dark:text-slate-200">
+                    <MarkdownContent content={content} />
+                </div>
+            )}
+        </div>
+    );
+}
+
+/* ---- Parse content into segments: plain text + tagged blocks ---- */
+
+type Segment = { type: "text"; content: string } | { type: "tag"; name: string; content: string };
+
+function parseContentSegments(raw: string): Segment[] {
+    // Match XML-like tags: <tag_name> or <tag name with spaces>
+    // Supports: <permissions instructions>...</permissions instructions>
+    //           <INSTRUCTIONS>...</INSTRUCTIONS>
+    //           <environment_context>...</environment_context>
+    const tagRegex = /<([\w][\w\s]*?)>\s*\n?([\s\S]*?)\n?\s*<\/\1\s*>/g;
+    const segments: Segment[] = [];
+    let lastIndex = 0;
+
+    let match;
+    while ((match = tagRegex.exec(raw)) !== null) {
+        // Text before this tag
+        if (match.index > lastIndex) {
+            const text = raw.slice(lastIndex, match.index).trim();
+            if (text) segments.push({ type: "text", content: text });
+        }
+        segments.push({ type: "tag", name: match[1].trim(), content: match[2].trim() });
+        lastIndex = tagRegex.lastIndex;
+    }
+
+    // Remaining text
+    if (lastIndex < raw.length) {
+        const text = raw.slice(lastIndex).trim();
+        if (text) segments.push({ type: "text", content: text });
+    }
+
+    return segments;
+}
+
+/* ---- MarkdownContent: auto-detects XML tags and renders collapsible sections ---- */
+
 function MarkdownContent({ content }: { content: string }) {
     const cleaned = cleanContent(content);
+    const segments = parseContentSegments(cleaned);
+
+    // No tags found — render as plain markdown
+    if (segments.length === 1 && segments[0].type === "text") {
+        return <MarkdownBlock text={cleaned} />;
+    }
+    // No segments at all (shouldn't happen, but safety)
+    if (segments.length === 0) {
+        return <MarkdownBlock text={cleaned} />;
+    }
+
     return (
-        <div className="prose prose-sm dark:prose-invert max-w-none break-words leading-relaxed
-      prose-headings:mt-4 prose-headings:mb-2 prose-headings:font-semibold
-      prose-h1:text-lg prose-h2:text-base prose-h3:text-sm
-      prose-p:my-2 prose-p:leading-relaxed
-      prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
-      prose-code:rounded-md prose-code:bg-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[13px] prose-code:font-mono prose-code:text-slate-700 prose-code:before:content-none prose-code:after:content-none
-      dark:prose-code:bg-neutral-800 dark:prose-code:text-slate-300
-      prose-pre:rounded-lg prose-pre:bg-slate-900 prose-pre:text-xs dark:prose-pre:bg-neutral-900
-      prose-strong:font-semibold
-      prose-blockquote:border-l-2 prose-blockquote:border-slate-300 dark:prose-blockquote:border-neutral-600
-    ">
-            <Markdown>{cleaned}</Markdown>
+        <div className="space-y-3">
+            {segments.map((seg, idx) =>
+                seg.type === "tag" ? (
+                    <TagSection key={idx} name={seg.name} content={seg.content} />
+                ) : (
+                    <MarkdownBlock key={idx} text={seg.content} />
+                ),
+            )}
         </div>
     );
 }
