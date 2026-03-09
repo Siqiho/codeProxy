@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Activity, Bot, FileKey, RefreshCw, Settings, Sigma, Sparkles, TriangleAlert } from "lucide-react";
 import { usageApi, type DashboardSummary } from "@/lib/http/apis/usage";
 import { KpiCard, MonitorCard } from "@/modules/monitor/MonitorPagePieces";
+import { SystemMonitorSection } from "@/modules/dashboard/SystemMonitorSection";
 import { Button } from "@/modules/ui/Button";
 import { EmptyState } from "@/modules/ui/EmptyState";
 import { Tabs, TabsList, TabsTrigger } from "@/modules/ui/Tabs";
@@ -124,6 +125,8 @@ export function DashboardPage() {
           icon={TriangleAlert}
         />
       </div>
+
+      <SystemMonitorSection />
 
       <MonitorCard
         title="快捷入口"
