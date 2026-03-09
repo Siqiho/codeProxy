@@ -199,17 +199,18 @@ function NetworkCard({ stats }: { stats: SystemStats }) {
 
 function ChannelLatencyCard({ data }: { data: ChannelLatency[] }) {
     if (!data || data.length === 0) return null;
-    const maxMs = Math.max(...data.map((d) => d.avg_ms));
+    const top5 = data.slice(0, 5);
+    const maxMs = Math.max(...top5.map((d) => d.avg_ms));
 
     return (
         <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/60">
             <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-white/40 mb-2.5">
                 <Network size={12} />
                 渠道平均延迟
-                <span className="ml-auto text-[9px] font-normal normal-case tracking-normal">近 7 天</span>
+                <span className="ml-auto text-[9px] font-normal normal-case tracking-normal">Top 5 · 近 7 天</span>
             </div>
             <div className="space-y-1.5">
-                {data.map((ch) => {
+                {top5.map((ch) => {
                     const pct = maxMs > 0 ? (ch.avg_ms / maxMs) * 100 : 0;
                     return (
                         <div key={ch.source} className="flex items-center gap-2">
