@@ -11,23 +11,20 @@ interface LogContentModalProps {
     onClose: () => void;
 }
 
-/**
- * Renders a single chat message in a styled block.
- * Supports roles: system, user, assistant, tool.
- */
-function MessageBlock({
-    role,
-    content,
-}: {
-    role: string;
-    content: string;
-}) {
-    const roleConfig: Record<
-        string,
-        { label: string; icon: string; color: string; bg: string }
-    > = {
+/* -------------------------------------------------------------------------- */
+/*  MessageBlock                                                              */
+/* -------------------------------------------------------------------------- */
+
+function MessageBlock({ role, content }: { role: string; content: string }) {
+    const roleConfig: Record<string, { label: string; icon: string; color: string; bg: string }> = {
         system: {
             label: "系统提示词",
+            icon: "⚙️",
+            color: "text-purple-700 dark:text-purple-300",
+            bg: "bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800/50",
+        },
+        developer: {
+            label: "开发者指令",
             icon: "⚙️",
             color: "text-purple-700 dark:text-purple-300",
             bg: "bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800/50",
@@ -49,6 +46,24 @@ function MessageBlock({
             icon: "🔧",
             color: "text-amber-700 dark:text-amber-300",
             bg: "bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800/50",
+        },
+        instructions: {
+            label: "指令 (Instructions)",
+            icon: "📋",
+            color: "text-indigo-700 dark:text-indigo-300",
+            bg: "bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-800/50",
+        },
+        function_call: {
+            label: "函数调用",
+            icon: "⚡",
+            color: "text-orange-700 dark:text-orange-300",
+            bg: "bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-800/50",
+        },
+        function_call_output: {
+            label: "函数返回",
+            icon: "📤",
+            color: "text-teal-700 dark:text-teal-300",
+            bg: "bg-teal-50 dark:bg-teal-950/30 border-teal-200 dark:border-teal-800/50",
         },
     };
 
@@ -72,62 +87,198 @@ function MessageBlock({
     );
 }
 
-/**
- * Extract text content from a message's content field, handling both
- * string and array<{type, text}> formats.
- */
-function extractTextContent(content: unknown): string {
+/* -------------------------------------------------------------------------- */
+/*  Content extraction helpers                                                */
+/* -------------------------------------------------------------------------- */
+
+type Msg = { role: string; content: string };
+
+/** Extract text from content field: string | array<{type,text}> | object */
+function extractText(content: unknown): string {
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
         return content
-            .filter((part: Record<string, unknown>) => part.type === "text" && typeof part.text === "string")
-            .map((part: Record<string, unknown>) => part.text as string)
+            .map((p: Record<string, unknown>) => {
+                if (typeof p.text === "string") return p.text;
+                if (typeof p.content === "string") return p.content;
+                return "";
+            })
+            .filter(Boolean)
             .join("\n");
     }
-    if (content && typeof content === "object") {
-        return JSON.stringify(content, null, 2);
-    }
+    if (content && typeof content === "object") return JSON.stringify(content, null, 2);
     return String(content ?? "");
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Input parsers                                                             */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Try to parse OpenAI-style messages from the input payload JSON.
- * Returns an array of {role, content} objects, or null if parsing fails.
+ * Parse OpenAI Chat Completions format: { messages: [{role, content}] }
  */
-function parseMessages(json: string): Array<{ role: string; content: string }> | null {
+function parseOpenAIMessages(data: Record<string, unknown>): Msg[] | null {
+    const msgs = data.messages;
+    if (!Array.isArray(msgs)) return null;
+    const result = msgs
+        .filter((m: Record<string, unknown>) => m.role && m.content !== undefined)
+        .map((m: Record<string, unknown>) => ({
+            role: String(m.role),
+            content: extractText(m.content),
+        }));
+    return result.length > 0 ? result : null;
+}
+
+/**
+ * Parse Codex / OpenAI Responses API format:
+ * { instructions?: string, input: [{ type:"message", role, content:[{text}] }, ...] }
+ */
+function parseCodexInput(data: Record<string, unknown>): Msg[] | null {
+    const input = data.input;
+    if (!Array.isArray(input)) return null;
+
+    const result: Msg[] = [];
+
+    // Instructions first
+    if (typeof data.instructions === "string" && data.instructions.trim()) {
+        result.push({ role: "instructions", content: data.instructions.trim() });
+    }
+
+    for (const item of input as Record<string, unknown>[]) {
+        const itemType = String(item.type || "");
+        if (itemType === "message") {
+            const role = String(item.role || "user");
+            const text = extractText(item.content);
+            if (text) result.push({ role, content: text });
+        } else if (itemType === "function_call") {
+            const name = String(item.name || "");
+            const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments ?? "");
+            result.push({ role: "function_call", content: `${name}(${args})` });
+        } else if (itemType === "function_call_output") {
+            const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? "");
+            result.push({ role: "function_call_output", content: output });
+        } else {
+            // Generic item — try to get content/text
+            const text = extractText(item.content ?? item.text ?? "");
+            if (text) result.push({ role: String(item.role || itemType || "unknown"), content: text });
+        }
+    }
+
+    return result.length > 0 ? result : null;
+}
+
+/** Parse input content into structured messages */
+function parseInputMessages(raw: string): Msg[] | null {
     try {
-        const data = JSON.parse(json);
-        // OpenAI format: { messages: [...] }
-        const messages = data.messages;
-        if (!Array.isArray(messages)) return null;
-        return messages
-            .filter((m: Record<string, unknown>) => m.role && m.content !== undefined)
-            .map((m: Record<string, unknown>) => ({
-                role: String(m.role),
-                content: extractTextContent(m.content),
-            }));
+        const data = JSON.parse(raw);
+        // Try Codex format first (has `input` array)
+        const codex = parseCodexInput(data);
+        if (codex) return codex;
+        // Try OpenAI format (has `messages` array)
+        const openai = parseOpenAIMessages(data);
+        if (openai) return openai;
+        return null;
     } catch {
         return null;
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Output parsers                                                            */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Try to extract the assistant's response text from the output payload JSON.
- * Supports OpenAI format: { choices: [{ message: { content } }] }
- * and Claude format: { content: [{ text }] }
+ * Parse SSE stream lines to extract text deltas.
+ * Supports:
+ *  - OpenAI streaming: data: {"choices":[{"delta":{"content":"..."}}]}
+ *  - Codex/Responses: data: {"type":"response.output_text.delta","delta":"..."}
+ *                     or data: {"type":"content_block_delta","delta":{"text":"..."}}
+ *  - Claude streaming: data: {"type":"content_block_delta","delta":{"text":"..."}}
  */
-function parseOutputContent(json: string): string | null {
+function parseSSEOutput(raw: string): string | null {
+    const lines = raw.split("\n");
+    const textParts: string[] = [];
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const jsonStr = trimmed.slice(5).trim();
+        if (jsonStr === "[DONE]") continue;
+
+        try {
+            const data = JSON.parse(jsonStr);
+
+            // OpenAI Chat Completions streaming: choices[0].delta.content
+            if (data.choices?.[0]?.delta?.content) {
+                textParts.push(data.choices[0].delta.content);
+                continue;
+            }
+
+            // Codex / Responses API text delta
+            if (data.type === "response.output_text.delta" && typeof data.delta === "string") {
+                textParts.push(data.delta);
+                continue;
+            }
+
+            // Claude content_block_delta
+            if (data.type === "content_block_delta" && data.delta?.text) {
+                textParts.push(data.delta.text);
+                continue;
+            }
+
+            // Codex response.completed — extract output text
+            if (data.type === "response.completed" && data.response?.output) {
+                const output = data.response.output;
+                if (Array.isArray(output)) {
+                    for (const item of output) {
+                        if (item.type === "message" && Array.isArray(item.content)) {
+                            for (const part of item.content) {
+                                if (part.type === "output_text" && typeof part.text === "string") {
+                                    // Only use this if we haven't accumulated deltas
+                                    if (textParts.length === 0) {
+                                        textParts.push(part.text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            // Skip non-JSON lines
+        }
+    }
+
+    return textParts.length > 0 ? textParts.join("") : null;
+}
+
+/** Parse non-stream output: single JSON response body */
+function parseNonStreamOutput(raw: string): string | null {
     try {
-        const data = JSON.parse(json);
+        const data = JSON.parse(raw);
         // OpenAI format
-        const choices = data.choices;
-        if (Array.isArray(choices) && choices.length > 0) {
-            const message = choices[0]?.message;
-            if (message?.content) return extractTextContent(message.content);
+        if (data.choices?.[0]?.message?.content) {
+            return extractText(data.choices[0].message.content);
         }
         // Claude format
         if (Array.isArray(data.content)) {
-            return extractTextContent(data.content);
+            return extractText(data.content);
+        }
+        // Codex/Responses format: response.output[].content[].text
+        if (data.response?.output || data.output) {
+            const output = data.response?.output || data.output;
+            if (Array.isArray(output)) {
+                const texts: string[] = [];
+                for (const item of output) {
+                    if (item.type === "message" && Array.isArray(item.content)) {
+                        for (const part of item.content) {
+                            if (typeof part.text === "string") texts.push(part.text);
+                        }
+                    }
+                }
+                if (texts.length > 0) return texts.join("\n");
+            }
         }
         // Gemini format
         const candidates = data.candidates || data.response?.candidates;
@@ -143,6 +294,21 @@ function parseOutputContent(json: string): string | null {
     }
 }
 
+/** Parse output content: try SSE stream first, then single JSON */
+function parseOutputMessages(raw: string): string | null {
+    // If it contains "data:" lines, treat as SSE
+    if (raw.includes("data:")) {
+        const sse = parseSSEOutput(raw);
+        if (sse) return sse;
+    }
+    // Try single JSON response
+    return parseNonStreamOutput(raw);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Component                                                                 */
+/* -------------------------------------------------------------------------- */
+
 export function LogContentModal({
     open,
     logId,
@@ -156,7 +322,6 @@ export function LogContentModal({
     const [model, setModel] = useState("");
     const [activeTab, setActiveTab] = useState<"input" | "output">(initialTab);
 
-    // Reset tab when initialTab changes
     useEffect(() => {
         setActiveTab(initialTab);
     }, [initialTab, logId]);
@@ -192,8 +357,7 @@ export function LogContentModal({
             );
         }
 
-        // Try to parse as messages array
-        const messages = parseMessages(inputContent);
+        const messages = parseInputMessages(inputContent);
         if (messages && messages.length > 0) {
             return (
                 <div className="space-y-3">
@@ -204,7 +368,7 @@ export function LogContentModal({
             );
         }
 
-        // Fallback: try to format as JSON, otherwise plain text
+        // Fallback: try formatted JSON, then plain text
         try {
             const formatted = JSON.stringify(JSON.parse(inputContent), null, 2);
             return (
@@ -231,8 +395,7 @@ export function LogContentModal({
             );
         }
 
-        // Try to parse assistant response
-        const assistantText = parseOutputContent(outputContent);
+        const assistantText = parseOutputMessages(outputContent);
         if (assistantText) {
             return (
                 <div className="space-y-3">
@@ -241,7 +404,7 @@ export function LogContentModal({
             );
         }
 
-        // Fallback: formatted JSON
+        // Fallback
         try {
             const formatted = JSON.stringify(JSON.parse(outputContent), null, 2);
             return (
