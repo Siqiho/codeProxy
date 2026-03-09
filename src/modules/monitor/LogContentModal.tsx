@@ -152,7 +152,7 @@ function CodeBlock({ language, children }: { language: string; children: string 
         <div className="overflow-hidden rounded-xl my-3" style={{ border: "1px solid #3e4451" }}>
             {/* Title bar — same dark bg as code */}
             <div
-                className="flex items-center justify-between px-4 py-2.5"
+                className="flex items-center justify-between px-4 py-1.5"
                 style={{ backgroundColor: "#282c34" }}
             >
                 <div className="flex items-center gap-3">
@@ -183,7 +183,7 @@ function CodeBlock({ language, children }: { language: string; children: string 
                     borderRadius: 0,
                     fontSize: "13px",
                     lineHeight: "1.6",
-                    padding: "16px",
+                    padding: "10px 16px 16px 16px",
                 }}
                 showLineNumbers={children.split("\n").length > 5}
                 wrapLongLines
