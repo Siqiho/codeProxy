@@ -182,7 +182,7 @@ function buildLogColumns(
           <button
             type="button"
             onClick={() => onContentClick(Number(row.id), "input")}
-            className="block min-w-0 w-full text-right cursor-pointer rounded px-1 -mx-1 transition hover:bg-sky-50 dark:hover:bg-sky-950/30"
+            className="inline-block ml-auto cursor-pointer rounded px-1.5 py-0.5 transition hover:bg-sky-50 dark:hover:bg-sky-950/30"
             title="点击查看输入内容"
           >
             <span className="truncate text-sky-600 dark:text-sky-400 underline decoration-sky-300/50 dark:decoration-sky-500/40 underline-offset-2">
@@ -223,7 +223,7 @@ function buildLogColumns(
           <button
             type="button"
             onClick={() => onContentClick(Number(row.id), "output")}
-            className="block min-w-0 w-full text-right cursor-pointer rounded px-1 -mx-1 transition hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+            className="inline-block ml-auto cursor-pointer rounded px-1.5 py-0.5 transition hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
             title="点击查看输出内容"
           >
             <span className="truncate text-emerald-600 dark:text-emerald-400 underline decoration-emerald-300/50 dark:decoration-emerald-500/40 underline-offset-2">
