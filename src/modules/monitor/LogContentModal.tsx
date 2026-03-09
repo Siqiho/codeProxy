@@ -169,18 +169,80 @@ function parseCodexInput(data: Record<string, unknown>): Msg[] | null {
 
 /** Parse input content into structured messages */
 function parseInputMessages(raw: string): Msg[] | null {
+    // First try: valid JSON
     try {
         const data = JSON.parse(raw);
-        // Try Codex format first (has `input` array)
         const codex = parseCodexInput(data);
         if (codex) return codex;
-        // Try OpenAI format (has `messages` array)
         const openai = parseOpenAIMessages(data);
         if (openai) return openai;
         return null;
     } catch {
-        return null;
+        // JSON is likely truncated (100KB limit). Try recovery.
     }
+
+    // Recovery for truncated Codex/Responses format:
+    // Extract "instructions" field value via regex
+    const result: Msg[] = [];
+
+    const instrMatch = raw.match(/"instructions"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+    if (instrMatch) {
+        const decoded = instrMatch[1]
+            .replace(/\\n/g, "\n")
+            .replace(/\\t/g, "\t")
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\");
+        result.push({ role: "instructions", content: decoded });
+    }
+
+    // Try to extract messages from "input" array - look for {type,role,content} patterns
+    const inputMatch = raw.match(/"input"\s*:\s*\[(.+)/s);
+    if (inputMatch) {
+        const inputStr = inputMatch[1];
+        // Extract individual input_text items
+        const textRegex = /"type"\s*:\s*"input_text"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/gs;
+        let match;
+        const texts: string[] = [];
+        while ((match = textRegex.exec(inputStr)) !== null) {
+            const decoded = match[1]
+                .replace(/\\n/g, "\n")
+                .replace(/\\t/g, "\t")
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, "\\");
+            texts.push(decoded);
+        }
+        if (texts.length > 0) {
+            result.push({ role: "user", content: texts.join("\n\n") });
+        }
+    }
+
+    // Recovery for truncated OpenAI Chat Completions format:
+    if (result.length === 0) {
+        const messagesMatch = raw.match(/"messages"\s*:\s*\[(.+)/s);
+        if (messagesMatch) {
+            // Try to extract role+content pairs
+            const roleContentRegex = /"role"\s*:\s*"(\w+)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"/gs;
+            let match;
+            while ((match = roleContentRegex.exec(messagesMatch[1])) !== null) {
+                const decoded = match[2]
+                    .replace(/\\n/g, "\n")
+                    .replace(/\\t/g, "\t")
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, "\\");
+                result.push({ role: match[1], content: decoded });
+            }
+        }
+    }
+
+    if (result.length > 0) {
+        result.push({
+            role: "system",
+            content: "⚠️ 注意：原始内容因超过大小限制被截断，部分消息可能不完整。",
+        });
+        return result;
+    }
+
+    return null;
 }
 
 /* -------------------------------------------------------------------------- */
